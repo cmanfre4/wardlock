@@ -88,11 +88,11 @@ Working agents are configured with only the credential lifecycle tools. The `aud
 
 The `provider`, `resource`, `permission`, and `reason` fields are the same four fields used in task manifests, operator overrides, and audit logs. This vocabulary is consistent across the entire framework. The `resource` and `permission` values are opaque strings interpreted by the provider — the broker routes the request and manages the lifecycle, but the provider gives them meaning.
 
-**Critical design principle: secrets never enter the model's context.** The broker interface returns metadata about issued credentials (status, expiry, what was configured) but never the actual secret material (tokens, certificates, passwords). Credential injection into the agent's environment is a side effect of the `request_access` call, handled by the broker and provider deterministically — not by the model. The model needs the *capability* (e.g., "kubectl is now configured for cluster X"), not the *secret* (e.g., the certificate bytes). This ensures that:
+**Critical design principle: the credential management flow does not surface secrets into the model's context.** The broker interface returns metadata about issued credentials (status, expiry, what was configured) — not the actual secret material (tokens, certificates, passwords). Secrets exist in the container's filesystem where CLI tools consume them, and the agent *could* read them (e.g., `cat ~/.kube/config`), but the framework's MCP interface never puts them into the conversation. Credential injection is a side effect of the `request_access` call, handled by the broker and isolation provider deterministically — not by the model. The model needs the *capability* (e.g., "kubectl is now configured for cluster X"), not the *secret* (e.g., the certificate bytes). This ensures that:
 
-- Secrets cannot be leaked through model outputs, conversation logs, or prompt injection attacks.
+- The default flow does not leak secrets through model outputs, conversation logs, or prompt injection attacks. Secrets only enter the model's context if the agent explicitly reads credential files from the filesystem.
 - Credential injection is deterministic and correct every time (broker code, not model inference).
-- The model's context window is not polluted with opaque secret material it has no reason to interpret.
+- The model's context window is not polluted with secret material it has no reason to interpret.
 
 Example `request_access` response (what the model sees):
 
@@ -112,7 +112,7 @@ Example `request_access` response (what the model sees):
 }
 ```
 
-The model knows what tools it can now use, which context to target, and when the credential expires. It never sees the underlying certificate or token.
+The model knows what tools it can now use, which context to target, and when the credential expires. The underlying certificate or token is in the container's filesystem for CLI tools to use, but is not surfaced through the MCP response.
 
 ### Credential Lifecycle
 
@@ -121,7 +121,7 @@ All credentials — both initial (declared in the manifest) and mid-task (discov
 1. **Request** — the agent calls `request_access` via MCP. At task start, the agent makes one call per credential declared in the manifest. Mid-task, the agent makes additional calls as it discovers new needs.
 2. **Evaluate** — the framework determines the approval tier. Manifest-declared credentials are pre-approved (the operator approved them when reviewing the manifest) and pass through immediately. Out-of-manifest requests are evaluated against the tier classification and approval budget.
 3. **Issue** — the backend credential provider creates a scoped, time-limited credential and returns a credential bundle describing what needs to be injected.
-4. **Inject** — the broker hands the bundle to the isolation provider, which materializes the files and runs any post-injection commands in the container. The agent never handles secret material.
+4. **Inject** — the broker hands the bundle to the isolation provider, which materializes the files and runs any post-injection commands in the container. Secrets are placed in the container's filesystem for CLI tools — they are not returned through the MCP response.
 5. **Respond** — the MCP tool returns metadata to the agent: status, expiry, credential ID, and what was configured. The agent now has this information in its context and knows what capabilities are available.
 6. **Monitor** — the framework tracks credential expiry.
 7. **Revoke** — credentials are revoked when the agent's container exits (normal completion, crash, or operator cancellation), the TTL expires, or early revocation is triggered. Container exit is the primary trigger — the framework ties credential lifecycle to container lifecycle, so active credentials for a task are automatically revoked when the container stops. See Failure Modes in Open Questions for edge cases (broker crash, orphaned credentials).
@@ -210,7 +210,7 @@ Credential providers are **isolation-agnostic**. They produce declarative bundle
 
 ##### Credential Bundle
 
-The `issue()` method returns a credential bundle: a declarative description of what needs to exist in the agent's container, plus metadata for the agent's context. The bundle contains secret material (file contents, tokens), but this material never reaches the model — the broker passes the bundle to the isolation provider for injection, and only the metadata portion is returned to the agent via the MCP response.
+The `issue()` method returns a credential bundle: a declarative description of what needs to exist in the agent's container, plus metadata for the agent's context. The bundle contains secret material (file contents, tokens). The broker passes the bundle to the isolation provider for injection and returns only the metadata portion to the agent via the MCP response. The secrets end up in the container's filesystem where CLI tools consume them — the agent could read these files directly, but the credential management flow does not put them into the conversation.
 
 A bundle consists of typed **injection entries**, each declaring an injection type that the isolation provider must implement. This keeps credential providers isolation-agnostic — they declare what they need, and the isolation provider decides how to materialize each type for its container technology.
 
@@ -253,7 +253,7 @@ interface CredentialBundle {
 
 New injection types can be added as needed (e.g., `socket`, `mount`). If an isolation provider encounters a type it doesn't support, it returns an error — the broker reports this as an injection failure. This makes the system extensible without requiring all isolation providers to support every type from day one.
 
-The credential provider produces the bundle. The broker splits it: `injections` go to the isolation provider for materialization, `metadata` goes to the agent via the MCP response. Secret material stays in infrastructure code and never enters the model's context.
+The credential provider produces the bundle. The broker splits it: `injections` go to the isolation provider for materialization, `metadata` goes to the agent via the MCP response. The credential management flow does not surface secret material into the model's context — though the agent has filesystem access to the injected files.
 
 Example bundles by provider:
 
@@ -342,7 +342,7 @@ Partial cleanup is acceptable if some artifacts can't be undone (e.g., a token t
 
 ### Credential Injection
 
-Credential injection is a **side effect of the broker's `request_access` call**, not a separate step the model performs. The model never handles secret material.
+Credential injection is a **side effect of the broker's `request_access` call**, not a separate step the model performs. The MCP response contains only metadata — secrets are materialized in the container's filesystem for CLI tools to consume.
 
 Injection is a collaboration between three components:
 
@@ -360,7 +360,7 @@ This separation keeps credential providers and isolation providers fully decoupl
 
 If an isolation provider encounters an injection type it doesn't support, it returns an error. This lets the system add new injection types incrementally without requiring all isolation providers to update simultaneously.
 
-Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code — the "secrets never enter the model's context" principle is about the model, not about the broker. The broker treats bundle contents as opaque bytes and does not log or inspect them.
+Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code. The broker treats bundle contents as opaque bytes and does not log or inspect them. The secrets ultimately live in the container's filesystem — accessible to the agent if it reads the files, but not surfaced through the MCP interface.
 
 The broker completes injection before returning the `request_access` MCP response, so by the time the model sees the "kubectl is now configured" metadata, the kubeconfig is already in place.
 
@@ -370,10 +370,10 @@ The broker exposes `request_access`, `revoke`, and `list_active` as MCP tools. T
 
 - The agent already knows how to discover and call MCP tools — no custom integration needed.
 - MCP tool descriptions serve as built-in documentation for the agent on how to request credentials.
-- The MCP tool response is the natural place to return credential metadata (status, expiry, what was configured) without exposing secret material. The "secrets never enter the model's context" principle is enforced at the protocol level — the broker orchestrates injection before responding and returns only the bundle's metadata to the agent.
+- The MCP tool response is the natural place to return credential metadata (status, expiry, what was configured) without surfacing secret material. The broker orchestrates injection before responding and returns only the bundle's metadata to the agent.
 - MCP servers can be configured per-container via the agent's MCP config, making the broker automatically available when the devcontainer launches.
 
-**Important constraint:** The broker's MCP surface must be **tools only**. MCP also supports *resources* (read-only data the model can access). Credentials must never be exposed as MCP resources, as that would put secret material into the model's context.
+**Important constraint:** The broker's MCP surface must be **tools only**. MCP also supports *resources* (read-only data the model can access). Credentials must not be exposed as MCP resources, as that would surface secret material into the model's context as part of the framework's own interface.
 
 **Transport:** The MCP server runs on the host (or as a sidecar). The transport between container and host is a Unix socket bind-mounted into the container (MCP supports stdio and streamable HTTP transports).
 
@@ -381,7 +381,7 @@ The broker exposes `request_access`, `revoke`, and `list_active` as MCP tools. T
 - **HTTP API on a Unix socket** — the broker listens on a socket that's bind-mounted into the container. Works with any agent that can make HTTP calls. The same "inject as side effect, return metadata" pattern applies.
 - **CLI wrapper** — a `broker` CLI inside the container communicates with the host broker via a socket or pipe. The agent runs `broker request-access --provider github --resource org/repo ...` as a shell command and parses the JSON metadata response.
 
-Both fallback options implement the same broker interface and the same secrets-never-in-context principle. The MCP approach is preferred because it requires no additional tooling inside the container and integrates naturally with how AI agents discover capabilities.
+Both fallback options implement the same broker interface and the same metadata-only response pattern. The MCP approach is preferred because it requires no additional tooling inside the container and integrates naturally with how AI agents discover capabilities.
 
 ### Bootstrap Credentials
 
@@ -873,7 +873,7 @@ npx wlk kubernetes \
 - Uses the GitHub App JWT authentication flow: sign a JWT with the App private key, exchange it for an installation token scoped to specific repos and permissions.
 - GitHub App installation tokens expire in 1 hour max — no need for manual revocation in most cases.
 - The GitHub REST API endpoint is `POST /app/installations/{installation_id}/access_tokens` with a body specifying `repositories` and `permissions`.
-- A custom git credential helper returns the token only for matching HTTPS URLs, ensuring the token is never exposed to the agent and only works for in-scope repos.
+- A custom git credential helper returns the token only for matching HTTPS URLs, ensuring the token only works for in-scope repos. The token exists in the credential helper script on the container's filesystem — git consumes it transparently without the model needing to handle it.
 - Git identity is configured as the App's bot account — commits are automatically verified by GitHub.
 - TypeScript libraries: `jsonwebtoken` for JWT signing, `octokit` for GitHub API calls.
 
@@ -937,12 +937,12 @@ spec:
 
 ### Phase 2: Minimal MCP Server
 
-**Goal**: Wrap the Phase 1 credential logic as an MCP server, validating the MCP integration pattern and the "secrets never in context" injection model. This becomes the seed of the actual broker.
+**Goal**: Wrap the Phase 1 credential logic as an MCP server, validating the MCP integration pattern and the metadata-only response model. This becomes the seed of the actual broker.
 
 **What gets built**:
 - A minimal MCP server exposing `request_access` and `list_active` as MCP tools.
 - Two hardcoded "providers" (GitHub and Kubernetes) using the Phase 1 credential logic internally.
-- Credential injection as a side effect of the MCP tool call — the agent receives metadata, not secrets.
+- Credential injection as a side effect of the MCP tool call — the MCP response contains metadata only, secrets are written to the filesystem.
 - No tiers, no manifests, no overrides, no mTLS, no devcontainer automation. The operator configures Claude Code to use the MCP server and runs the agent locally.
 
 **What changes from Phase 1**:
@@ -969,7 +969,7 @@ Agent receives:
 
 **What this validates**:
 - Does the MCP integration work smoothly with Claude Code?
-- Does the "secrets never in context" model hold up in practice — can the agent work effectively with only metadata?
+- Does the metadata-only response model hold up in practice — can the agent work effectively without secrets in the MCP response, even though they're accessible on the filesystem?
 - What does the agent need to be told (via system prompt / context) to use `request_access` correctly?
 - Is the `InjectionResult` metadata sufficient for the agent to understand its capabilities?
 
