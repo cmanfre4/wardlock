@@ -867,11 +867,34 @@ npx wlk kubernetes \
 - Git identity is configured as the App's bot account — commits are automatically verified by GitHub.
 - TypeScript libraries: `jsonwebtoken` for JWT signing, `octokit` for GitHub API calls.
 
-**Kubernetes implementation notes**:
-- Uses `tsh kube login` under the hood, specifying the cluster and requesting a specific Teleport role.
-- The TTL is controlled by the Teleport certificate TTL, which can be shorter than the operator's full session TTL.
-- The output kubeconfig is written to a temporary directory.
-- TypeScript: `child_process.execFile` to wrap `tsh`, `js-yaml` for kubeconfig manipulation.
+**Kubernetes implementation notes (via Teleport)**:
+
+Teleport already provides complete credential isolation for Kubernetes. The agent never possesses credentials that work against the real K8s API server. The connection chain is:
+
+```
+kubectl → (Teleport cert, mTLS) → Teleport Proxy → (reverse tunnel) → Teleport K8s Service → (impersonation headers) → K8s API Server
+```
+
+- `tsh kube login` issues an x509 cert signed by **Teleport's User CA** — not a Kubernetes cert. The cert encodes Kubernetes groups/users in custom ASN.1 extensions (OID `1.3.9999.1.*`). This cert is useless against the K8s API server directly — it only works against the Teleport Proxy.
+- The kubeconfig points to the **Teleport Proxy address**, not the K8s API server. The agent never learns the real API server address.
+- The Teleport Kubernetes Service connects to the real K8s API server using **its own service account** and translates Teleport identity into **Kubernetes impersonation headers** (`Impersonate-User`, `Impersonate-Group`). Standard K8s RBAC applies from there.
+- Certificate TTL is controlled per-role via `max_session_ttl` (default 12h, hard cap 30h). Teleport takes the minimum across all applicable roles.
+
+**Machine ID (tbot) integration** — the programmatic path for Wardlock's credential provider:
+
+- `tbot` is a daemon for non-human identities. It authenticates via join tokens (supports AWS IAM, GCP SA, K8s SA — no interactive login) and continuously renews short-lived Teleport certs.
+- The `kubernetes/v2` service type outputs a standard `kubeconfig.yaml` with embedded Teleport certs to a configured directory. This is the integration point: the Wardlock Teleport provider manages tbot lifecycle and injects the output kubeconfig as a `file` injection entry.
+- On revocation, stop tbot and delete the kubeconfig. The Teleport certs in the kubeconfig are already short-lived and scoped to specific clusters/groups.
+
+Because Teleport handles the credential isolation and proxying, Wardlock does not need to build its own TLS-intercepting proxy for Kubernetes when Teleport is available. Wardlock adds the request/approve/revoke lifecycle on top of Teleport's existing credential isolation.
+
+For non-Teleport Kubernetes setups (direct API server access with bearer tokens or client certs), the proxy injection type described in open questions would be the alternative path.
+
+**Teleport Application Access** — Teleport also provides an HTTPS reverse proxy for web applications and APIs. The architecture is the same pattern: client connects to the Teleport Proxy with Teleport certs, the Proxy forwards through a reverse tunnel to the Teleport Application Service, which rewrites requests (injects headers, JWTs) and forwards to the backend. Teleport has first-class credential injection for AWS (IAM role assumption, SigV4 signing), Azure, and GCP. For arbitrary SaaS APIs (like GitHub), Teleport can proxy the traffic and inject static headers, but lacks the dynamic credential management that Wardlock provides (issuing scoped short-lived tokens, rotation, revocation). The integration model for cloud APIs: Wardlock's Teleport provider leverages Teleport's native cloud support where available, and falls back to Wardlock's own credential providers (e.g., GitHub App tokens) with file injection for SaaS APIs that Teleport doesn't natively handle.
+
+**Teleport as a credential provider** — In Wardlock's taxonomy, Teleport is a **credential provider**, not a new provider type. The Teleport provider's `issue()` call configures tbot to produce certs for the requested cluster or app and returns a `CredentialBundle` with `file` injection entries (kubeconfig, TLS certs). The fact that the kubeconfig points to the Teleport Proxy rather than the real K8s API server is an implementation detail of the credential — not something Wardlock needs to model separately. The proxy behavior is inherent to the credential: a Teleport cert naturally routes through the Teleport Proxy, the same way a GitHub credential helper naturally calls the GitHub API. Wardlock doesn't manage git's HTTPS connections — it just puts the credential helper in place. The provider taxonomy stays clean: credential providers produce bundles, isolation providers materialize them.
+
+- TypeScript: `child_process.execFile` to wrap `tsh`/`tbot`, `js-yaml` for kubeconfig manipulation.
 
 **Teleport role design** — scoped Teleport roles need to exist before the Kubernetes credential scoping works. Examples:
 
@@ -1072,7 +1095,7 @@ The credential injection mechanism is defined in the main doc (see Credential In
   - **What the proxy cannot cover**: non-TLS protocols (SSH key-based auth on port 22) and tools with fully custom connection logic that bypass standard TLS/HTTP stacks.
   - **CA trust injection** adds complexity: the Wardlock CA cert must be added to the container's system trust store, plus language-specific stores (Node.js `NODE_EXTRA_CA_CERTS`, Python `REQUESTS_CA_BUNDLE`, Java keystore) and tool-specific config (`git http.sslCAInfo`). The isolation provider would handle this at container setup.
   - **Open design question**: should the mTLS CA (agent-to-broker auth) and the interception CA (proxy-generated destination certs) be the same CA or separate CAs? Separate CAs limit blast radius — compromising the interception CA only allows MITM of agent traffic, not impersonation of agents to the broker.
-  - **Kubernetes API server analysis**: kubectl's connection to the API server supports both client certificate auth (real mTLS at the TLS handshake layer) and bearer token auth (HTTP `Authorization` header inside the TLS tunnel). Both are proxyable. Bearer token injection is the cleaner path — most managed Kubernetes (EKS, GKE, AKS) uses token-based auth, and even kubeadm clusters can issue ServiceAccount tokens. Client cert mTLS proxying also works (the proxy holds the private key and presents the cert to the API server) but identity is baked into the TLS session (CN/O fields), making per-request identity switching impossible. kubectl still needs a kubeconfig on disk to know where to connect, but that kubeconfig is just a non-secret pointer to the proxy address — no credential material in it. Additional proxy complexity for Kubernetes: WebSocket/SPDY upgrades (`kubectl exec`, `kubectl port-forward`) and long-lived watch streams (`kubectl get pods -w`) require the proxy to handle HTTP upgrades and chunked streaming.
+  - **Kubernetes API server analysis**: kubectl's connection to the API server supports both client certificate auth (real mTLS at the TLS handshake layer) and bearer token auth (HTTP `Authorization` header inside the TLS tunnel). Both are proxyable. Bearer token injection is the cleaner path — most managed Kubernetes (EKS, GKE, AKS) uses token-based auth, and even kubeadm clusters can issue ServiceAccount tokens. Client cert mTLS proxying also works (the proxy holds the private key and presents the cert to the API server) but identity is baked into the TLS session (CN/O fields), making per-request identity switching impossible. kubectl still needs a kubeconfig on disk to know where to connect, but that kubeconfig is just a non-secret pointer to the proxy address — no credential material in it. Additional proxy complexity for Kubernetes: WebSocket/SPDY upgrades (`kubectl exec`, `kubectl port-forward`) and long-lived watch streams (`kubectl get pods -w`) require the proxy to handle HTTP upgrades and chunked streaming. **Note**: For Teleport-managed clusters, the proxy injection type is unnecessary — Teleport already provides credential isolation via its own proxy and impersonation model (see Kubernetes implementation notes under Pre-MVP). The Wardlock proxy would be relevant for non-Teleport K8s setups with direct API server access.
   - This would be an additional injection type alongside `file` and `env`, not a replacement. A credential provider's bundle could mix types — e.g., `proxy` for the API token and `file` for a non-secret kubeconfig pointing to the proxy. Worth evaluating once file injection is proven and the mTLS CA infrastructure is mature.
 
 ### Multi-Agent Coordination
