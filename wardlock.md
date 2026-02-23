@@ -2,7 +2,7 @@
 
 A framework for isolating agents and providing scoped, time-limited permissions to external resources so they can work autonomously with bounded blast radius.
 
-Named for the ward — the internal mechanism of a lock that determines which key fits. Wardlock determines what level of access each agent request gets.
+Named for the ward — the internal mechanism of a lock that determines which key fits. Wardlock determines what level of access an agent can request, and gates the approval required to grant it.
 
 ## Problem Statement
 
