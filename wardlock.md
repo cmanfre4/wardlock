@@ -124,7 +124,7 @@ All credentials — both initial (declared in the manifest) and mid-task (discov
 3. **Issue** — the backend credential provider creates a scoped, time-limited credential and returns a credential bundle describing what needs to be injected.
 4. **Inject** — the broker hands the bundle to the isolation provider, which materializes the files and runs any post-injection commands in the container. The agent never handles secret material.
 5. **Respond** — the MCP tool returns metadata to the agent: status, expiry, credential ID, and what was configured. The agent now has this information in its context and knows what capabilities are available.
-6. **Monitor** — the framework tracks credential expiry and usage.
+6. **Monitor** — the framework tracks credential expiry.
 7. **Revoke** — credentials are revoked when the agent's container exits (normal completion, crash, or operator cancellation), the TTL expires, or early revocation is triggered. Container exit is the primary trigger — the framework ties credential lifecycle to container lifecycle, so active credentials for a task are automatically revoked when the container stops. See Failure Modes in Open Questions for edge cases (broker crash, orphaned credentials).
 
 ### Time Limits
@@ -766,7 +766,6 @@ All credential requests, approvals, denials, and revocations are logged.
 - Approval tier and outcome (auto-approved, rubber-stamped, adversarial-reviewed, human-approved, denied)
 - Adversarial agent assessments (if applicable)
 - Credential ID, TTL, and revocation time
-- Actual usage of the credential (if the provider supports access logging)
 
 ### Alerting and Anomaly Detection
 
@@ -774,7 +773,7 @@ An audit log is only valuable if something is reviewing it. The framework should
 
 - Alerting on denied requests or adversarial agent disagreements
 - Anomaly detection on credential request patterns (e.g., an agent requesting significantly more access than its task manifest declared)
-- Post-task review summaries showing what access was actually used vs. what was requested
+- Post-task review summaries showing what access was requested vs. what was declared in the manifest
 
 ---
 
@@ -789,7 +788,7 @@ A typical multi-repo infrastructure task:
 5. **Agent begins work** — operates within the approved scope, using the tools and contexts configured by the credential responses.
 6. **Agent discovers additional need** — requests access to a resource not in the manifest via the same `request_access` MCP call. The framework evaluates the tier and routes to the appropriate approval path. If within the approval budget, lower-tier requests proceed with logging. If budget is exhausted or the request is high-tier, it escalates.
 7. **High-risk operation** — agent needs to run terraform apply against production. The request goes to adversarial review. Adversarial agents confirm the request aligns with the task. The operation proceeds (or escalates to the operator if there's disagreement).
-8. **Task completes** — all credentials are revoked. An audit summary is generated showing what access was requested, approved, used, and when.
+8. **Task completes** — all credentials are revoked. An audit summary is generated showing what access was requested, approved, and when. Actual usage auditing is left to the backing systems (GitHub audit log, Kubernetes audit log, CloudTrail, etc.).
 
 ---
 
@@ -1114,7 +1113,7 @@ Possible integrations:
 - Terraform: state rollback or targeted destroy of resources created during a failed task.
 - Kubernetes: rollback to previous deployment revision.
 
-This is likely out of scope for the MVP but worth designing for. The audit log (which tracks what credentials were used and when) provides the information needed to know what to roll back.
+This is likely out of scope for the MVP but worth designing for. The framework's audit log tracks what credentials were issued and when, and the backing systems' own audit logs (GitHub, CloudTrail, Kubernetes audit) track what was actually done with those credentials. Correlating across these systems to determine what to roll back is a significant undertaking and is not a near-term goal.
 
 ### State and Storage
 
