@@ -37,7 +37,8 @@ The agent runs in an isolated environment (container or VM) that only has access
 
 Isolation is modular, providing consistent semantics across varying container and VM technologies.
 
-- **Docker / Devcontainers** — low overhead, widely understood, good CLI/IDE integration. Likely the right starting point for local development workflows.
+- **Localhost** — no actual isolation. The agent runs directly on the operator's machine. This is the starting point: it lets the credential brokering loop work end-to-end without container complexity, and serves as a skeleton/reference implementation for the isolation provider interface.
+- **Docker / Devcontainers** — low overhead, widely understood, good CLI/IDE integration. The first real isolation provider, providing filesystem and credential isolation from the host.
 - **Kubernetes (EKS)** — more relevant for multi-agent or cloud-native scenarios. Better suited as a target provider in the modular layer rather than the starting point.
 - **Remote VMs** — for scenarios where local resources are insufficient or stronger isolation guarantees are needed.
 
@@ -121,7 +122,7 @@ All credentials — both initial (declared in the manifest) and mid-task (discov
 1. **Request** — the agent calls `request_access` via MCP. At task start, the agent makes one call per credential declared in the manifest. Mid-task, the agent makes additional calls as it discovers new needs.
 2. **Evaluate** — the framework determines the approval tier. Manifest-declared credentials are pre-approved (the operator approved them when reviewing the manifest) and pass through immediately. Out-of-manifest requests are evaluated against the tier classification and approval budget.
 3. **Issue** — the backend credential provider creates a scoped, time-limited credential and returns a credential bundle describing what needs to be injected.
-4. **Inject** — the broker hands the bundle to the isolation provider, which materializes the files and runs any post-injection commands in the container. Secrets are placed in the container's filesystem for CLI tools — they are not returned through the MCP response.
+4. **Inject** — the broker hands the bundle to the isolation provider, which materializes the files in the target environment (localhost filesystem in early phases, container filesystem later). Secrets are placed where CLI tools expect them — they are not returned through the MCP response.
 5. **Respond** — the MCP tool returns metadata to the agent: status, expiry, credential ID, and what was configured. The agent now has this information in its context and knows what capabilities are available.
 6. **Monitor** — the framework tracks credential expiry.
 7. **Revoke** — credentials are revoked when the agent's container exits (normal completion, crash, or operator cancellation), the TTL expires, or early revocation is triggered. Container exit is the primary trigger — the framework ties credential lifecycle to container lifecycle, so active credentials for a task are automatically revoked when the container stops. See Failure Modes in Open Questions for edge cases (broker crash, orphaned credentials).
@@ -218,8 +219,7 @@ A bundle consists of typed **injection entries**, each declaring an injection ty
 // Each entry declares a type and type-specific parameters
 type InjectionEntry =
   | { type: "file"; path: string; content: string; mode?: string }
-  | { type: "env"; name: string; value: string }
-  | { type: "exec"; command: string };
+  | { type: "env"; name: string; value: string };
 
 interface CredentialBundle {
   // Unique identifier for this credential (used for revoke, monitoring)
@@ -249,7 +249,6 @@ interface CredentialBundle {
 |---|---|---|
 | `file` | Write a file at `path` (relative to container home) with `content`. Optional `mode` (e.g., `"0755"` for executables). | Phase 1 |
 | `env` | Set environment variable `name` to `value`. | Phase 3 |
-| `exec` | Run `command` inside the container (e.g., `git config` calls). | Phase 1 |
 
 New injection types can be added as needed (e.g., `socket`, `mount`). If an isolation provider encounters a type it doesn't support, it returns an error — the broker reports this as an injection failure. This makes the system extensible without requiring all isolation providers to support every type from day one.
 
@@ -270,16 +269,9 @@ Example bundles by provider:
       "mode": "0755"
     },
     {
-      "type": "exec",
-      "command": "git config --global credential.helper '!~/.config/git/wlk-credential-helper'"
-    },
-    {
-      "type": "exec",
-      "command": "git config --global user.name 'wardlock[bot]'"
-    },
-    {
-      "type": "exec",
-      "command": "git config --global user.email '12345+wardlock[bot]@users.noreply.github.com'"
+      "type": "file",
+      "path": ".gitconfig.d/wardlock.inc",
+      "content": "[credential]\n\thelper = !~/.config/git/wlk-credential-helper\n[user]\n\tname = wardlock[bot]\n\temail = 12345+wardlock[bot]@users.noreply.github.com"
     }
   ],
   "metadata": {
@@ -332,11 +324,10 @@ interface RevocationBundle {
 
 type RevocationEntry =
   | { type: "file"; path: string }         // delete this file
-  | { type: "env"; name: string }           // unset this env var
-  | { type: "exec"; command: string };      // run cleanup command
+  | { type: "env"; name: string };         // unset this env var
 ```
 
-The broker passes the revocation bundle to the isolation provider, which removes the files, unsets env vars, and runs any cleanup commands. The provider handles backend-side revocation (e.g., invalidating a GitHub token via API) as part of the `revoke()` call itself.
+The broker passes the revocation bundle to the isolation provider, which removes the files and unsets env vars. The provider handles backend-side revocation (e.g., invalidating a GitHub token via API) as part of the `revoke()` call itself.
 
 Partial cleanup is acceptable if some artifacts can't be undone (e.g., a token that can only be revoked by TTL expiry). The `backend_revoked` field indicates whether the provider was able to invalidate the credential at the source.
 
@@ -346,21 +337,20 @@ Credential injection is a **side effect of the broker's `request_access` call**,
 
 Injection is a collaboration between three components:
 
-1. **Credential provider** — produces a credential bundle declaring what needs to exist in the container (files, post-injection commands) and what metadata to show the agent. The provider is isolation-agnostic — it has no knowledge of how containers work.
-2. **Broker** — orchestrates the flow. Calls the credential provider to get the bundle, hands the files and commands to the isolation provider for materialization, and returns only the metadata portion to the agent via the MCP response.
-3. **Isolation provider** — materializes the bundle in the container. It knows how to get files and commands into the specific container technology being used.
+1. **Credential provider** — produces a credential bundle declaring what needs to exist in the container (files to write, env vars to set) and what metadata to show the agent. The provider is isolation-agnostic — it has no knowledge of how containers work.
+2. **Broker** — orchestrates the flow. Calls the credential provider to get the bundle, hands the entries to the isolation provider for materialization, and returns only the metadata portion to the agent via the MCP response.
+3. **Isolation provider** — materializes the bundle in the container. It knows how to write files and set env vars for the specific container technology being used.
 
-This separation keeps credential providers and isolation providers fully decoupled. A GitHub credential provider doesn't need to know whether the container is a local devcontainer or a remote Kubernetes pod — it produces the same bundle either way. Each isolation provider implements the injection types it supports:
+This separation keeps credential providers and isolation providers fully decoupled. A GitHub credential provider doesn't need to know whether it's running on localhost or in a remote Kubernetes pod — it produces the same bundle either way. Each isolation provider implements the injection types it supports:
 
-| Injection Type | Devcontainer (local) | Kubernetes pod (future) | Remote VM (future) |
-|---|---|---|---|
-| `file` | Write to bind-mounted shared volume | Create Secret, mount into pod | scp to host |
-| `exec` | `docker exec` | `kubectl exec` | ssh exec |
-| `env` | Container env config or wrapper script | Pod env spec or ConfigMap | Export in shell profile |
+| Injection Type | Localhost | Devcontainer (future) | Kubernetes pod (future) | Remote VM (future) |
+|---|---|---|---|---|
+| `file` | Write directly to filesystem | Write to bind-mounted shared volume | Create Secret, mount into pod | scp to host |
+| `env` | Export in shell profile | Container env config or wrapper script | Pod env spec or ConfigMap | Export in shell profile |
 
 If an isolation provider encounters an injection type it doesn't support, it returns an error. This lets the system add new injection types incrementally without requiring all isolation providers to update simultaneously.
 
-Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code. The broker treats bundle contents as opaque bytes and does not log or inspect them. The secrets ultimately live in the container's filesystem — accessible to the agent if it reads the files, but not surfaced through the MCP interface.
+Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code. The broker treats bundle contents as opaque bytes and does not log or inspect them. The secrets ultimately live on the filesystem where the agent runs — accessible to the agent if it reads the files, but not surfaced through the MCP interface.
 
 The broker completes injection before returning the `request_access` MCP response, so by the time the model sees the "kubectl is now configured" metadata, the kubeconfig is already in place.
 
@@ -371,7 +361,7 @@ The broker exposes `request_access`, `revoke`, and `list_active` as MCP tools. T
 - The agent already knows how to discover and call MCP tools — no custom integration needed.
 - MCP tool descriptions serve as built-in documentation for the agent on how to request credentials.
 - The MCP tool response is the natural place to return credential metadata (status, expiry, what was configured) without surfacing secret material. The broker orchestrates injection before responding and returns only the bundle's metadata to the agent.
-- MCP servers can be configured per-container via the agent's MCP config, making the broker automatically available when the devcontainer launches.
+- MCP servers can be configured per-environment via the agent's MCP config, making the broker automatically available whether running on localhost or inside a container.
 
 **Important constraint:** The broker's MCP surface must be **tools only**. MCP also supports *resources* (read-only data the model can access). Credentials must not be exposed as MCP resources, as that would surface secret material into the model's context as part of the framework's own interface.
 
@@ -943,7 +933,8 @@ spec:
 - A minimal MCP server exposing `request_access` and `list_active` as MCP tools.
 - Two hardcoded "providers" (GitHub and Kubernetes) using the Phase 1 credential logic internally.
 - Credential injection as a side effect of the MCP tool call — the MCP response contains metadata only, secrets are written to the filesystem.
-- No tiers, no manifests, no overrides, no mTLS, no devcontainer automation. The operator configures Claude Code to use the MCP server and runs the agent locally.
+- A **localhost isolation provider** that writes files directly to the operator's filesystem — no containers, no isolation, but it implements the full isolation provider interface and validates the injection/revocation lifecycle.
+- No tiers, no manifests, no overrides, no mTLS, no container isolation. The operator configures Claude Code to use the MCP server and runs the agent locally.
 
 **What changes from Phase 1**:
 - Instead of the operator running `npx wlk github ...` manually before a session, the agent calls `request_access` via MCP during the session.
@@ -972,13 +963,15 @@ Agent receives:
 - Does the metadata-only response model hold up in practice — can the agent work effectively without secrets in the MCP response, even though they're accessible on the filesystem?
 - What does the agent need to be told (via system prompt / context) to use `request_access` correctly?
 - Is the `InjectionResult` metadata sufficient for the agent to understand its capabilities?
+- Does the localhost isolation provider skeleton capture the right interface for future providers to implement?
 
 **Order of work**:
 1. Add MCP server infrastructure to the Phase 1 project (using the official TypeScript MCP SDK)
-2. Wrap GitHub credential logic as a `request_access` handler
-3. Wrap Kubernetes credential logic as a `request_access` handler
-4. Add `list_active` tool for the agent to check current credentials
-5. Configure Claude Code to use the MCP server and test end-to-end
+2. Implement the localhost isolation provider (file writes, revocation/cleanup)
+3. Wrap GitHub credential logic as a `request_access` handler
+4. Wrap Kubernetes credential logic as a `request_access` handler
+5. Add `list_active` tool for the agent to check current credentials
+6. Configure Claude Code to use the MCP server and test end-to-end
 
 ---
 
