@@ -213,7 +213,15 @@ Credential providers are **isolation-agnostic**. They produce declarative bundle
 
 The `issue()` method returns a credential bundle: a declarative description of what needs to exist in the agent's container, plus metadata for the agent's context. The bundle contains secret material (file contents, tokens), but this material never reaches the model — the broker passes the bundle to the isolation provider for injection, and only the metadata portion is returned to the agent via the MCP response.
 
+A bundle consists of typed **injection entries**, each declaring an injection type that the isolation provider must implement. This keeps credential providers isolation-agnostic — they declare what they need, and the isolation provider decides how to materialize each type for its container technology.
+
 ```typescript
+// Each entry declares a type and type-specific parameters
+type InjectionEntry =
+  | { type: "file"; path: string; content: string; mode?: string }
+  | { type: "env"; name: string; value: string }
+  | { type: "exec"; command: string };
+
 interface CredentialBundle {
   // Unique identifier for this credential (used for revoke, monitoring)
   credential_id: string;
@@ -221,13 +229,10 @@ interface CredentialBundle {
   // When the credential expires
   expires: string;
 
-  // Files to write into the container — path → content
-  // Paths are relative to the container's home directory
-  files: Record<string, string>;
-
-  // Shell commands to run inside the container after files are written
-  // (e.g., "git config --global credential.helper ...")
-  post_inject_commands?: string[];
+  // Typed injection entries — each describes something to materialize
+  // in the container. Isolation providers implement the mechanics for
+  // each type.
+  injections: InjectionEntry[];
 
   // Metadata for the agent's context — provider-defined, describes what
   // was configured in human-readable terms. This is the ONLY part of the
@@ -239,7 +244,17 @@ interface CredentialBundle {
 }
 ```
 
-The credential provider produces the bundle. The broker splits it: `files` and `post_inject_commands` go to the isolation provider for materialization, `metadata` goes to the agent via the MCP response. Secret material stays in infrastructure code and never enters the model's context.
+**Injection types:**
+
+| Type | Description | Phase |
+|---|---|---|
+| `file` | Write a file at `path` (relative to container home) with `content`. Optional `mode` (e.g., `"0755"` for executables). | Phase 1 |
+| `env` | Set environment variable `name` to `value`. | Phase 3 |
+| `exec` | Run `command` inside the container (e.g., `git config` calls). | Phase 1 |
+
+New injection types can be added as needed (e.g., `socket`, `mount`). If an isolation provider encounters a type it doesn't support, it returns an error — the broker reports this as an injection failure. This makes the system extensible without requiring all isolation providers to support every type from day one.
+
+The credential provider produces the bundle. The broker splits it: `injections` go to the isolation provider for materialization, `metadata` goes to the agent via the MCP response. Secret material stays in infrastructure code and never enters the model's context.
 
 Example bundles by provider:
 
@@ -248,12 +263,25 @@ Example bundles by provider:
 {
   "credential_id": "cred-gh-abc123",
   "expires": "2026-02-22T15:30:00Z",
-  "files": {
-    ".config/git/wlk-credential-helper": "#!/bin/sh\n# credential helper script content...",
-    ".config/git/config": "# git config with credential helper and identity..."
-  },
-  "post_inject_commands": [
-    "chmod +x ~/.config/git/wlk-credential-helper"
+  "injections": [
+    {
+      "type": "file",
+      "path": ".config/git/wlk-credential-helper",
+      "content": "#!/bin/sh\n# credential helper script content...",
+      "mode": "0755"
+    },
+    {
+      "type": "exec",
+      "command": "git config --global credential.helper '!~/.config/git/wlk-credential-helper'"
+    },
+    {
+      "type": "exec",
+      "command": "git config --global user.name 'wardlock[bot]'"
+    },
+    {
+      "type": "exec",
+      "command": "git config --global user.email '12345+wardlock[bot]@users.noreply.github.com'"
+    }
   ],
   "metadata": {
     "injected": {
@@ -271,9 +299,13 @@ Example bundles by provider:
 {
   "credential_id": "cred-k8s-def456",
   "expires": "2026-02-22T15:00:00Z",
-  "files": {
-    ".kube/config": "# kubeconfig YAML content..."
-  },
+  "injections": [
+    {
+      "type": "file",
+      "path": ".kube/config",
+      "content": "# kubeconfig YAML content..."
+    }
+  ],
   "metadata": {
     "injected": {
       "kubeconfig": "~/.kube/config",
@@ -288,22 +320,24 @@ The `metadata.injected` field is intentionally a flat key-value map rather than 
 
 ##### Revocation Bundle
 
-The `revoke()` method returns a revocation bundle describing what to clean up:
+The `revoke()` method returns a revocation bundle describing what to clean up, using the same injection type system:
 
 ```typescript
 interface RevocationBundle {
-  // Files to delete from the container
-  files_to_remove: string[];
-
-  // Shell commands to run inside the container (e.g., reset git config)
-  post_revoke_commands?: string[];
+  // Typed entries describing what to undo in the container
+  revocations: RevocationEntry[];
 
   // Whether the provider also invalidated the credential backend-side
   backend_revoked: boolean;
 }
+
+type RevocationEntry =
+  | { type: "file"; path: string }         // delete this file
+  | { type: "env"; name: string }           // unset this env var
+  | { type: "exec"; command: string };      // run cleanup command
 ```
 
-The broker passes the revocation bundle to the isolation provider, which removes the files and runs any cleanup commands. The provider also handles backend-side revocation (e.g., invalidating a GitHub token via API) as part of the `revoke()` call itself.
+The broker passes the revocation bundle to the isolation provider, which removes the files, unsets env vars, and runs any cleanup commands. The provider handles backend-side revocation (e.g., invalidating a GitHub token via API) as part of the `revoke()` call itself.
 
 Partial cleanup is acceptable if some artifacts can't be undone (e.g., a token that can only be revoked by TTL expiry). The `backend_revoked` field indicates whether the provider was able to invalidate the credential at the source.
 
@@ -317,15 +351,17 @@ Injection is a collaboration between three components:
 2. **Broker** — orchestrates the flow. Calls the credential provider to get the bundle, hands the files and commands to the isolation provider for materialization, and returns only the metadata portion to the agent via the MCP response.
 3. **Isolation provider** — materializes the bundle in the container. It knows how to get files and commands into the specific container technology being used.
 
-This separation keeps credential providers and isolation providers fully decoupled. A GitHub credential provider doesn't need to know whether the container is a local devcontainer or a remote Kubernetes pod — it produces the same bundle either way. The isolation provider handles the transport:
+This separation keeps credential providers and isolation providers fully decoupled. A GitHub credential provider doesn't need to know whether the container is a local devcontainer or a remote Kubernetes pod — it produces the same bundle either way. Each isolation provider implements the injection types it supports:
 
-- **Devcontainer (local)**: write files to a bind-mounted shared volume, `exec` post-injection commands into the container.
-- **Kubernetes pod (future)**: create a Secret from the file contents, mount it into the pod, `kubectl exec` post-injection commands.
-- **Remote VM (future)**: scp files, ssh exec commands.
+| Injection Type | Devcontainer (local) | Kubernetes pod (future) | Remote VM (future) |
+|---|---|---|---|
+| `file` | Write to bind-mounted shared volume | Create Secret, mount into pod | scp to host |
+| `exec` | `docker exec` | `kubectl exec` | ssh exec |
+| `env` | Container env config or wrapper script | Pod env spec or ConfigMap | Export in shell profile |
 
-Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code — the "secrets never enter the model's context" principle is about the model, not about the broker. The broker treats bundle file contents as opaque bytes and does not log or inspect them.
+If an isolation provider encounters an injection type it doesn't support, it returns an error. This lets the system add new injection types incrementally without requiring all isolation providers to update simultaneously.
 
-Environment variables are not a primary injection mechanism — they are set at process start time, don't support rotation, and are visible to all processes in the container. However, some tools genuinely expect them (e.g., `VAULT_TOKEN`, `AWS_*`). The credential bundle can declare env vars as a secondary injection type if needed, and the isolation provider decides how to set them based on its container technology.
+Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code — the "secrets never enter the model's context" principle is about the model, not about the broker. The broker treats bundle contents as opaque bytes and does not log or inspect them.
 
 The broker completes injection before returning the `request_access` MCP response, so by the time the model sees the "kubectl is now configured" metadata, the kubeconfig is already in place.
 
@@ -1035,7 +1071,7 @@ The credential injection mechanism is defined in the main doc (see Credential In
 
 - On revocation, the isolation provider removes files and runs cleanup commands from the revocation bundle. But does the agent need to be notified that a credential was revoked, or is it sufficient for the next CLI command to simply fail?
 - If multiple credential bundles write to the same file path (e.g., two Kubernetes clusters both targeting `.kube/config`), how are merges handled? Kubeconfig supports multiple contexts natively, but other tools may not. Should the isolation provider handle merging, or should credential providers use distinct file paths?
-- Should the credential bundle support env var declarations as a secondary injection type? Some tools expect env vars (`VAULT_TOKEN`, `AWS_*`). If so, how does the isolation provider handle rotation for env vars that can't be updated after container start?
+- For the `env` injection type (Phase 3): how does the isolation provider handle rotation for env vars that can't be updated after container start? Options include wrapper scripts, a sidecar that re-exports, or requiring the container to be restarted.
 
 ### Multi-Agent Coordination
 
