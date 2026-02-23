@@ -46,7 +46,6 @@ Isolation is modular, providing consistent semantics across varying container an
 - A shell/environment with only the CLI tools needed for the task (kubectl, tsh, vault, terraform, gh, aws, etc.)
 - No direct access to the host filesystem beyond explicitly mounted project directories
 - No inherited credentials from the host — all credentials are injected by the credential broker
-- Network policy controls (what the container can reach outbound)
 
 ### Communication
 
