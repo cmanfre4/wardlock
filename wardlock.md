@@ -72,19 +72,19 @@ The central component of the framework. The credential broker manages the lifecy
 
 The broker exposes a consistent interface regardless of backend:
 
-**Agent-facing (MCP tools):**
+**Credential lifecycle (MCP tools for working agents):**
 ```
 request_access(provider, resource, permission, reason, duration) → scoped credential or denial
 revoke(credential_id) → early revocation
 list_active() → currently active credentials
 ```
 
-**Operator-facing (CLI / API, not exposed as MCP tools):**
+**Audit and analysis (MCP tools for specialized agents, CLI / API for operators):**
 ```
 audit_log(filter) → query audit trail
 ```
 
-The agent has no reason to query the audit trail — that is an operator and compliance concern. The MCP surface is intentionally limited to credential lifecycle operations.
+Working agents are configured with only the credential lifecycle tools. The `audit_log` tool is not exposed to working agents — they have no reason to query the audit trail during task execution. However, `audit_log` is available as an MCP tool for specialized agents tuned for audit analysis, compliance review, or manifest improvement (see below). It is also available via CLI and API for operator use.
 
 The `provider`, `resource`, `permission`, and `reason` fields are the same four fields used in task manifests, operator overrides, and audit logs. This vocabulary is consistent across the entire framework. The `resource` and `permission` values are opaque strings interpreted by the provider — the broker routes the request and manages the lifecycle, but the provider gives them meaning.
 
@@ -1025,7 +1025,7 @@ Possible approaches:
 - The framework could suggest a manifest based on past similar tasks or repository analysis.
 - An agent could generate a draft manifest as part of task planning, which the operator then reviews and approves.
 - Common task patterns could be captured as reusable manifest templates (e.g., "multi-repo terraform rollout" template that takes parameters).
-- The framework could learn from audit logs — if the agent consistently requests the same out-of-manifest credentials for a type of task, suggest adding them to the template.
+- A specialized audit analysis agent (configured with the `audit_log` MCP tool, not the credential lifecycle tools) could review historical audit data and identify repeated out-of-manifest credential requests for certain task types, then suggest manifest template improvements. This closes the feedback loop: working agents generate audit data, analysis agents mine it, manifests get better over time.
 
 ### Provider Discovery and Configuration
 
