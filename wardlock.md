@@ -121,8 +121,8 @@ All credentials — both initial (declared in the manifest) and mid-task (discov
 
 1. **Request** — the agent calls `request_access` via MCP. At task start, the agent makes one call per credential declared in the manifest. Mid-task, the agent makes additional calls as it discovers new needs.
 2. **Evaluate** — the framework determines the approval tier. Manifest-declared credentials are pre-approved (the operator approved them when reviewing the manifest) and pass through immediately. Out-of-manifest requests are evaluated against the tier classification and approval budget.
-3. **Issue** — the backend provider issues a scoped, time-limited credential.
-4. **Inject** — the credential is injected into the agent's environment as a side effect (config files written to well-known paths). The agent never handles secret material.
+3. **Issue** — the backend credential provider creates a scoped, time-limited credential and returns a credential bundle describing what needs to be injected.
+4. **Inject** — the broker hands the bundle to the isolation provider, which materializes the files and runs any post-injection commands in the container. The agent never handles secret material.
 5. **Respond** — the MCP tool returns metadata to the agent: status, expiry, credential ID, and what was configured. The agent now has this information in its context and knows what capabilities are available.
 6. **Monitor** — the framework tracks credential expiry and usage.
 7. **Revoke** — credentials are revoked when the agent's container exits (normal completion, crash, or operator cancellation), the TTL expires, or early revocation is triggered. Container exit is the primary trigger — the framework ties credential lifecycle to container lifecycle, so active credentials for a task are automatically revoked when the container stops. See Failure Modes in Open Questions for edge cases (broker crash, orphaned credentials).
@@ -203,46 +203,66 @@ Each provider implements a consistent interface that the broker calls to manage 
 
 - `schema()` — returns the provider's supported resource types, permission levels, and additional match dimensions for overrides.
 - `classify(resource, permission)` → tier — returns the provider's default tier classification for a given request.
-- `issue(resource, permission, duration)` → injection result — creates a scoped, time-limited credential, performs all injection side effects, and returns metadata describing what was configured.
-- `revoke(credential_id)` — revokes a previously issued credential and cleans up all injection side effects.
+- `issue(resource, permission, duration)` → credential bundle — creates a scoped, time-limited credential and returns a bundle describing what needs to be injected into the container and what metadata to show the agent.
+- `revoke(credential_id)` → revocation bundle — returns the artifacts to remove and any backend-side cleanup (e.g., token invalidation).
 - `validate(resource, permission)` → bool — checks whether the requested resource and permission are valid and the provider can fulfill them.
 
-##### Injection Results
+Credential providers are **isolation-agnostic**. They produce declarative bundles describing what needs to exist in the container — they do not write files or configure tools directly. The broker hands the bundle to the isolation provider, which knows how to materialize it in the container (see Credential Injection below).
 
-The `issue()` method does not return secret material to the broker. It performs injection directly (writing files, configuring tools) and returns a metadata object describing what was configured. This metadata is what the broker passes through to the agent via the MCP response.
+##### Credential Bundle
 
-A provider may configure multiple things as part of a single `issue()` call. For example, the GitHub provider configures git credential helper, commit identity, and committer email — all as side effects of issuing a single installation token. The Kubernetes provider writes a kubeconfig entry and sets the kubectl context. The injection result must be flexible enough to describe all of these:
+The `issue()` method returns a credential bundle: a declarative description of what needs to exist in the agent's container, plus metadata for the agent's context. The bundle contains secret material (file contents, tokens), but this material never reaches the model — the broker passes the bundle to the isolation provider for injection, and only the metadata portion is returned to the agent via the MCP response.
 
 ```typescript
-interface InjectionResult {
+interface CredentialBundle {
   // Unique identifier for this credential (used for revoke, monitoring)
   credential_id: string;
 
   // When the credential expires
   expires: string;
 
-  // What was configured in the container — provider-defined, passed to the
-  // agent as-is so it knows what tools/paths/contexts are available
-  injected: Record<string, string>;
+  // Files to write into the container — path → content
+  // Paths are relative to the container's home directory
+  files: Record<string, string>;
 
-  // Human-readable summary for the agent's context
-  note: string;
+  // Shell commands to run inside the container after files are written
+  // (e.g., "git config --global credential.helper ...")
+  post_inject_commands?: string[];
+
+  // Metadata for the agent's context — provider-defined, describes what
+  // was configured in human-readable terms. This is the ONLY part of the
+  // bundle that reaches the model via the MCP response.
+  metadata: {
+    injected: Record<string, string>;
+    note: string;
+  };
 }
 ```
 
-Example injection results by provider:
+The credential provider produces the bundle. The broker splits it: `files` and `post_inject_commands` go to the isolation provider for materialization, `metadata` goes to the agent via the MCP response. Secret material stays in infrastructure code and never enters the model's context.
+
+Example bundles by provider:
 
 **GitHub:**
 ```json
 {
   "credential_id": "cred-gh-abc123",
   "expires": "2026-02-22T15:30:00Z",
-  "injected": {
-    "credential_helper": "configured for https://github.com/org/eks-cluster-module",
-    "commit_identity": "wardlock[bot]",
-    "committer_email": "12345+wardlock[bot]@users.noreply.github.com"
+  "files": {
+    ".config/git/wlk-credential-helper": "#!/bin/sh\n# credential helper script content...",
+    ".config/git/config": "# git config with credential helper and identity..."
   },
-  "note": "git configured for HTTPS access to org/eks-cluster-module with contents:write. Commits attributed to wardlock[bot] and automatically verified."
+  "post_inject_commands": [
+    "chmod +x ~/.config/git/wlk-credential-helper"
+  ],
+  "metadata": {
+    "injected": {
+      "credential_helper": "configured for https://github.com/org/eks-cluster-module",
+      "commit_identity": "wardlock[bot]",
+      "committer_email": "12345+wardlock[bot]@users.noreply.github.com"
+    },
+    "note": "git configured for HTTPS access to org/eks-cluster-module with contents:write. Commits attributed to wardlock[bot] and automatically verified."
+  }
 }
 ```
 
@@ -251,34 +271,63 @@ Example injection results by provider:
 {
   "credential_id": "cred-k8s-def456",
   "expires": "2026-02-22T15:00:00Z",
-  "injected": {
-    "kubeconfig": "~/.kube/config",
-    "context": "customer-a-staging"
+  "files": {
+    ".kube/config": "# kubeconfig YAML content..."
   },
-  "note": "kubectl configured for cluster customer-a-staging with readonly access."
+  "metadata": {
+    "injected": {
+      "kubeconfig": "~/.kube/config",
+      "context": "customer-a-staging"
+    },
+    "note": "kubectl configured for cluster customer-a-staging with readonly access."
+  }
 }
 ```
 
-The `injected` field is intentionally a flat key-value map rather than a structured type — each provider defines what keys are meaningful for its domain. The broker doesn't interpret these; it passes them through to the agent.
+The `metadata.injected` field is intentionally a flat key-value map rather than a structured type — each provider defines what keys are meaningful for its domain. The broker doesn't interpret these; it passes them through to the agent.
 
-##### Revocation Cleanup
+##### Revocation Bundle
 
-The `revoke()` method must undo everything `issue()` configured:
+The `revoke()` method returns a revocation bundle describing what to clean up:
 
-- GitHub: remove the credential helper entry, reset git identity configuration, invalidate the token if possible.
-- Kubernetes: remove the context and cluster entry from `~/.kube/config`, delete any cached certificates.
+```typescript
+interface RevocationBundle {
+  // Files to delete from the container
+  files_to_remove: string[];
 
-Partial cleanup is acceptable if some artifacts can't be undone (e.g., a token that can only be revoked by TTL expiry). The provider should document what it can and cannot clean up.
+  // Shell commands to run inside the container (e.g., reset git config)
+  post_revoke_commands?: string[];
+
+  // Whether the provider also invalidated the credential backend-side
+  backend_revoked: boolean;
+}
+```
+
+The broker passes the revocation bundle to the isolation provider, which removes the files and runs any cleanup commands. The provider also handles backend-side revocation (e.g., invalidating a GitHub token via API) as part of the `revoke()` call itself.
+
+Partial cleanup is acceptable if some artifacts can't be undone (e.g., a token that can only be revoked by TTL expiry). The `backend_revoked` field indicates whether the provider was able to invalidate the credential at the source.
 
 ### Credential Injection
 
-Credential injection is a **side effect of the broker's `request_access` call**, not a separate step the model performs. When the broker approves and issues a credential, the provider writes it directly into the agent's container environment. The model never handles secret material.
+Credential injection is a **side effect of the broker's `request_access` call**, not a separate step the model performs. The model never handles secret material.
 
-The provider writes credentials as **config files on a shared volume** — to well-known paths (`~/.kube/config`, `~/.config/gh/hosts.yml`) on a volume that's bind-mounted into the container. Most CLI tools expect credentials in these locations, so no additional setup is needed inside the container. This supports mid-task updates (the broker can overwrite the file for rotation or delete it for revocation).
+Injection is a collaboration between three components:
 
-Environment variables are intentionally excluded as a primary injection mechanism — they are set at process start time, don't support rotation, and are visible to all processes in the container.
+1. **Credential provider** — produces a credential bundle declaring what needs to exist in the container (files, post-injection commands) and what metadata to show the agent. The provider is isolation-agnostic — it has no knowledge of how containers work.
+2. **Broker** — orchestrates the flow. Calls the credential provider to get the bundle, hands the files and commands to the isolation provider for materialization, and returns only the metadata portion to the agent via the MCP response.
+3. **Isolation provider** — materializes the bundle in the container. It knows how to get files and commands into the specific container technology being used.
 
-The broker writes the file before returning the `request_access` response, so by the time the model sees the "kubectl is now configured" metadata, the kubeconfig is already in place.
+This separation keeps credential providers and isolation providers fully decoupled. A GitHub credential provider doesn't need to know whether the container is a local devcontainer or a remote Kubernetes pod — it produces the same bundle either way. The isolation provider handles the transport:
+
+- **Devcontainer (local)**: write files to a bind-mounted shared volume, `exec` post-injection commands into the container.
+- **Kubernetes pod (future)**: create a Secret from the file contents, mount it into the pod, `kubectl exec` post-injection commands.
+- **Remote VM (future)**: scp files, ssh exec commands.
+
+Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code — the "secrets never enter the model's context" principle is about the model, not about the broker. The broker treats bundle file contents as opaque bytes and does not log or inspect them.
+
+Environment variables are not a primary injection mechanism — they are set at process start time, don't support rotation, and are visible to all processes in the container. However, some tools genuinely expect them (e.g., `VAULT_TOKEN`, `AWS_*`). The credential bundle can declare env vars as a secondary injection type if needed, and the isolation provider decides how to set them based on its container technology.
+
+The broker completes injection before returning the `request_access` MCP response, so by the time the model sees the "kubectl is now configured" metadata, the kubeconfig is already in place.
 
 ### MCP Integration
 
@@ -286,7 +335,7 @@ The broker exposes `request_access`, `revoke`, and `list_active` as MCP tools. T
 
 - The agent already knows how to discover and call MCP tools — no custom integration needed.
 - MCP tool descriptions serve as built-in documentation for the agent on how to request credentials.
-- The MCP tool response is the natural place to return credential metadata (status, expiry, what was configured) without exposing secret material. The "secrets never enter the model's context" principle is enforced at the protocol level — the MCP tool performs injection as a side effect and returns only metadata.
+- The MCP tool response is the natural place to return credential metadata (status, expiry, what was configured) without exposing secret material. The "secrets never enter the model's context" principle is enforced at the protocol level — the broker orchestrates injection before responding and returns only the bundle's metadata to the agent.
 - MCP servers can be configured per-container via the agent's MCP config, making the broker automatically available when the devcontainer launches.
 
 **Important constraint:** The broker's MCP surface must be **tools only**. MCP also supports *resources* (read-only data the model can access). Credentials must never be exposed as MCP resources, as that would put secret material into the model's context.
@@ -961,8 +1010,7 @@ The provider contract interface is defined in the main doc (see Provider Contrac
 
 - How does the provider report errors (invalid resource, insufficient bootstrap permissions, rate limits)?
 - Should the provider expose a `renew(credential_id, duration)` method, or should renewal go through the full `issue` path?
-- How does the provider know the container's filesystem paths for injection? Is the container workspace path passed to `issue()`, or is it configured globally on the provider?
-- Should the `injected` map support structured values (e.g., a list of configured repos) or stay strictly flat?
+- Should the `metadata.injected` map support structured values (e.g., a list of configured repos) or stay strictly flat?
 
 ### Bootstrap Credential Sub-questions
 
@@ -985,8 +1033,9 @@ The MCP integration design is defined in the main doc (see MCP Integration under
 
 The credential injection mechanism is defined in the main doc (see Credential Injection under Credential Brokering). Remaining open questions:
 
-- How does revocation work with config files? The broker can delete the file, but does the agent need to be notified that a credential was revoked, or is it sufficient for the next CLI command to simply fail?
-- If multiple credentials write to the same config file (e.g., two Kubernetes clusters both writing to `~/.kube/config`), how are merges handled? Kubeconfig supports multiple contexts natively, but other tools may not.
+- On revocation, the isolation provider removes files and runs cleanup commands from the revocation bundle. But does the agent need to be notified that a credential was revoked, or is it sufficient for the next CLI command to simply fail?
+- If multiple credential bundles write to the same file path (e.g., two Kubernetes clusters both targeting `.kube/config`), how are merges handled? Kubeconfig supports multiple contexts natively, but other tools may not. Should the isolation provider handle merging, or should credential providers use distinct file paths?
+- Should the credential bundle support env var declarations as a secondary injection type? Some tools expect env vars (`VAULT_TOKEN`, `AWS_*`). If so, how does the isolation provider handle rotation for env vars that can't be updated after container start?
 
 ### Multi-Agent Coordination
 
