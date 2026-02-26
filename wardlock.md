@@ -1143,31 +1143,41 @@ As load increases, the single broker process decomposes into component parts. Th
 
 **Worker credential flow — workers never hold long-lived secrets:**
 
-1. Control plane approves a credential request and enqueues a job with a **job ID** (never credentials in the queue)
-2. Worker picks up the job ID from the queue
-3. Worker authenticates to the control plane (workers have their own mTLS cert or long-lived identity)
-4. Worker requests credentials for the job: "I picked up job X, give me what I need"
-5. Control plane verifies the worker's identity, verifies the job is legitimately assigned, and issues a short-lived scoped JWT for the specific operation
-6. Worker presents the JWT to the backend (for backends supporting JWKS verification) or receives a short-lived token the control plane obtained from the backend (for backends like GitHub that don't support JWKS)
-7. Worker does the work, returns the result to the control plane via the state store
+1. Control plane approves a credential request and enqueues a **credential job** (job ID + metadata, no secrets) for a credential worker
+2. Credential worker picks up the job, authenticates to the control plane (workers have their own mTLS cert or long-lived identity)
+3. Credential worker requests credentials for the job: "I picked up job X, give me what I need"
+4. Control plane verifies the worker's identity, verifies the job is legitimately assigned, and issues a short-lived scoped JWT for the specific backend operation
+5. Credential worker presents the JWT to the backend (for backends supporting JWKS verification) or receives a short-lived token the control plane obtained from the backend (for backends like GitHub that don't support JWKS)
+6. Credential worker receives the credential bundle from the backend
+7. Credential worker **encrypts the bundle** using the EncryptionProvider and enqueues an **injection job** with the encrypted bundle attached
+8. Isolation worker picks up the injection job, **decrypts the bundle** using the EncryptionProvider, and gets its own scoped JWT for the isolation backend
+9. Isolation worker injects the bundle into the target environment, reports success
 
-Credentials are never placed in the queue. The JWT is issued just-in-time over a direct authenticated channel when the worker is ready to use it. If a worker is compromised, the attacker gets a JWT that can do one specific thing and expires shortly. Spinning up more workers requires no secret distribution — they authenticate to the control plane and get scoped JWTs per job.
+**Encrypted bundles in transit.** The credential bundle contains secret material (tokens, keys, certs). Plaintext bundles are never stored in queues, tables, or the control plane's state store. The credential worker encrypts the bundle immediately after receiving it from the backend, and the isolation worker decrypts it immediately before injection. The encrypted ciphertext is opaque — useless without access to the decryption key. This means the encrypted bundle can safely sit in a queue or table between the two workers.
+
+**Separation of duties.** The credential worker can encrypt but not decrypt. The isolation worker can decrypt but not encrypt. This is enforced by the encryption backend's access policies (IAM policies for KMS, Vault policies for Transit). The control plane orchestrates the flow but never touches plaintext bundle contents. Every encrypt and decrypt operation is audited by the encryption backend (CloudTrail for KMS, Vault audit log for Transit).
+
+**Revocation bundles** are stored separately in the control plane's state store. These contain only cleanup instructions (file paths to delete, env var names to unset) — no secret material — and are needed later when credentials expire or are revoked.
+
+Spinning up more workers requires no secret distribution — they authenticate to the control plane and get scoped JWTs per job.
 
 **Pluggable infrastructure backends:**
 
-The control plane depends on two infrastructure interfaces:
+The control plane depends on three infrastructure interfaces:
 
-- **StateStore**: `get`, `put`, `query`, `delete` — holds active credentials, approval queue, audit log, task state.
-- **WorkQueue**: `enqueue`, `dequeue`, `ack`, `nack` — distributes jobs to workers.
+- **StateStore**: `get`, `put`, `query`, `delete` — holds credential metadata, approval queue, audit log, task state, revocation bundles. No secret material.
+- **WorkQueue**: `enqueue`, `dequeue`, `ack`, `nack` — distributes jobs to workers. Encrypted bundles may be attached to injection jobs.
+- **EncryptionProvider**: `encrypt(plaintext) → ciphertext`, `decrypt(ciphertext) → plaintext` — protects credential bundles in transit between workers.
 
-| Adoption Phase | StateStore | WorkQueue |
-|---|---|---|
-| Phase 1 (local) | `InMemoryStateStore` (or SQLite for persistence) | `InMemoryWorkQueue` (async function calls within the same process) |
-| Phase 2+ (remote) | `DynamoDBStateStore` | `SQSWorkQueue` |
+| Adoption Phase | StateStore | WorkQueue | EncryptionProvider |
+|---|---|---|---|
+| Phase 1 (local) | `InMemoryStateStore` (or SQLite) | `InMemoryWorkQueue` (async function calls) | `LocalKeyEncryptionProvider` (RSA key pair on disk) |
+| Phase 2+ (AWS) | `DynamoDBStateStore` | `SQSWorkQueue` | `KMSEncryptionProvider` |
+| Phase 2+ (non-AWS) | Equivalent managed DB | Equivalent managed queue | `VaultTransitEncryptionProvider` |
 
 The in-memory implementations should behave like the real ones — async returns (promises, not synchronous), serialize/deserialize data (catch accidental object reference sharing). This prevents surprises when swapping to real backends.
 
-In Phase 1, the "workers" are just async functions in the same process. The queue is an event emitter. The state store is a Map. The decomposition exists at the interface level, not the deployment level — same pattern as the localhost isolation provider.
+In Phase 1, the "workers" are just async functions in the same process. The queue is an event emitter. The state store is a Map. The encryption provider uses a local RSA key pair. The decomposition exists at the interface level, not the deployment level — same pattern as the localhost isolation provider.
 
 ---
 
