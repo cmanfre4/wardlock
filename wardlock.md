@@ -218,7 +218,7 @@ A bundle consists of typed **injection entries**, each declaring an injection ty
 ```typescript
 // Each entry declares a type and type-specific parameters
 type InjectionEntry =
-  | { type: "file"; path: string; content: string; mode?: string }
+  | { type: "file"; path: string; content: string; mode?: string }  // content is base64-encoded
   | { type: "env"; name: string; value: string };
 
 interface CredentialBundle {
@@ -247,7 +247,7 @@ interface CredentialBundle {
 
 | Type | Description | Phase |
 |---|---|---|
-| `file` | Write a file at `path` (relative to container home) with `content`. Optional `mode` (e.g., `"0755"` for executables). | Phase 1 |
+| `file` | Write a file at `path` (relative to container home) with base64-encoded `content`. Optional `mode` (e.g., `"0755"` for executables). | Phase 1 |
 | `env` | Set environment variable `name` to `value`. | Phase 3 |
 
 New injection types can be added as needed (e.g., `socket`, `mount`). If an isolation provider encounters a type it doesn't support, it returns an error — the broker reports this as an injection failure. This makes the system extensible without requiring all isolation providers to support every type from day one.
@@ -265,13 +265,13 @@ Example bundles by provider:
     {
       "type": "file",
       "path": ".config/git/wlk-credential-helper",
-      "content": "#!/bin/sh\n# credential helper script content...",
+      "content": "IyEvYmluL3NoCiMgY3JlZGVudGlhbCBoZWxwZXIgc2NyaXB0IGNvbnRlbnQu...",
       "mode": "0755"
     },
     {
       "type": "file",
       "path": ".gitconfig.d/wardlock.inc",
-      "content": "[credential]\n\thelper = !~/.config/git/wlk-credential-helper\n[user]\n\tname = wardlock[bot]\n\temail = 12345+wardlock[bot]@users.noreply.github.com"
+      "content": "W2NyZWRlbnRpYWxdCgloZWxwZXIgPSAhfi8uY29uZmlnL2dpdC93bGstY3Jl..."
     }
   ],
   "metadata": {
@@ -294,7 +294,7 @@ Example bundles by provider:
     {
       "type": "file",
       "path": ".kube/config",
-      "content": "# kubeconfig YAML content..."
+      "content": "YXBpVmVyc2lvbjogdjEKa2luZDogQ29uZmlnCmNsdXN0ZXJzOi..."
     }
   ],
   "metadata": {
