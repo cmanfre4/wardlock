@@ -1031,6 +1031,77 @@ These must be answered before Phase 3 implementation can begin. Phases 1 and 2 c
 
 ---
 
+## Adoption Phases
+
+The implementation phases above describe what gets built. The adoption phases below describe how the deployment model evolves as usage scales from a single practitioner to an organization. Each adoption phase introduces architectural requirements that the implementation must eventually support.
+
+---
+
+### Adoption Phase 1: Solo Practitioner, Local Broker
+
+The operator runs the broker on their laptop. Agents run locally (localhost isolation provider). The CLI communicates with the broker over HTTP on localhost — no auth, no TLS, but the API contract is real from day one. This means the operator-facing API and the agent-facing MCP interface are separate surfaces from the start: agents talk MCP via Unix socket, the CLI talks HTTP to the broker's API.
+
+**Architecture:** Single process. Broker + MCP server + credential providers all in one. The trust boundary is the operator's machine. Bootstrap credentials (GitHub App key, Teleport join token) live in local config. Approval prompts appear in the operator's terminal.
+
+**Why the API matters early:** The CLI-to-broker API exists and is tested before auth, TLS, durable state, or any hosted infrastructure enters the picture. Same rationale as the localhost isolation provider — get the interface working before the real implementation.
+
+---
+
+### Adoption Phase 2: Solo Practitioner, Remote Broker
+
+The operator moves the broker to cloud infrastructure (a VM, a container, a small K8s deployment). Agents run in remote isolation providers alongside it. The operator's laptop is no longer in the critical path — tasks survive laptop sleep/shutdown.
+
+**This is the first real architectural inflection.** Everything that was trivially local now needs to work over the network:
+
+- **Auth between CLI and broker.** In solo mode, this could be a simple pre-shared token or mTLS cert. Nothing fancy — it's one person.
+- **Bootstrap credentials move out of the laptop.** The GitHub App key, Teleport join token, etc. now live wherever the broker runs — a secrets manager or encrypted config.
+- **Approval flow changes.** The operator can't get a terminal prompt on a remote broker. Approvals need to happen through the CLI (polling or push), a web UI, or notifications.
+- **Durable state.** The broker needs to survive restarts. Active credentials, audit log, approval queue need persistent storage. In Adoption Phase 1 these can be in-memory.
+- **TLS.** The CLI-to-broker API is now over the internet.
+
+The key advantage of having the API from Phase 1: you're adding auth and infrastructure to an API that already works, not inventing the API at the same time.
+
+---
+
+### Adoption Phase 3: Multi-Practitioner, OIDC Auth
+
+Multiple people in the org use the CLI to launch agents and request credentials. The broker integrates with organizational OIDC (Okta, Azure AD, Google Workspace, etc.).
+
+**Architecture changes:**
+
+- **CLI authenticates via OIDC.** Device flow or browser redirect. The CLI gets an ID token, presents it to the broker. The broker validates against the org's IdP.
+- **Authorization becomes real.** Who can launch what tasks? Who can approve what tier of credential? The broker needs a role/policy model mapping OIDC claims (groups, roles) to Wardlock permissions.
+- **Audit attribution matters.** Every credential request is tied to an authenticated identity. The audit log goes from "the operator did X" to "alice@company.com's agent requested X."
+- **Credential scoping may be identity-dependent.** Alice can request GitHub tokens for repos she has access to. Bob can't request tokens for Alice's repos. The broker may need to map OIDC identity to allowed credential scopes.
+- **The broker becomes a shared service.** Needs proper uptime, monitoring, possibly HA.
+
+---
+
+### Adoption Phase 4: Organizational Orchestration
+
+The org's own automation systems (CI/CD pipelines, internal platforms, custom orchestrators) integrate with the broker directly. The broker is clustered for availability and throughput.
+
+**Architecture changes:**
+
+- **The broker API becomes a first-class integration surface.** Service accounts authenticate via OIDC client credentials flow or mTLS. API stability and versioning matter.
+- **Clustering.** Multiple broker instances sharing state. Leader election or shared database for credential lifecycle, approval queues, audit log.
+- **Delegated approval.** Orchestration systems pre-approve certain credential patterns via policy rather than requiring human approval. The tier system becomes policy-driven: "CI pipelines from this service account auto-approve Tier 1-2, escalate Tier 3+."
+- **Multi-tenancy.** Different teams, different credential scopes, different policies. The broker needs namespace isolation or team-scoped configuration.
+- **Provider scaling.** Many concurrent credential operations. Providers may need connection pooling, rate limiting, circuit breakers for backend system API limits.
+
+---
+
+### Key Transitions
+
+The biggest architectural jumps:
+
+1. **Phase 1 → 2**: Local to remote. Forces real auth, durable state, TLS, and rethinks the approval UX. Hardest jump because it touches everything.
+2. **Phase 3 → 4**: Multi-user to org orchestration forces clustering, API stability, and multi-tenancy.
+
+Phases 1-2 are solo practitioner — buildable and validatable without organizational buy-in. Phase 3 is the "convince your team" phase. Phase 4 is the "convince platform engineering" phase.
+
+---
+
 ## Open Questions
 
 ### Manifest Authoring UX
