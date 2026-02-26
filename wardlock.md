@@ -375,54 +375,9 @@ Both fallback options implement the same broker interface and the same metadata-
 
 ### Bootstrap Credentials
 
-The broker itself needs credentials to create scoped credentials on behalf of the agent. The bootstrap credential model supports two modes that represent a natural progression from individual adoption to organizational rollout.
+The broker needs credentials to create scoped credentials on behalf of the agent. These are the **bootstrap credentials** — the broad credentials from which the broker derives narrower, task-specific ones.
 
-#### Solo Practitioner Mode
-
-The operator already has broad access to the systems the agent needs to reach. The broker's job is to **derive constrained credentials from the operator's existing sessions** rather than requiring dedicated service identities.
-
-- The GitHub provider uses a GitHub App that the operator installs on their own orgs. The App's private key lives on the operator's machine. The operator is the App's sole administrator.
-- The Kubernetes/Teleport provider uses the operator's existing `tsh` session (from their normal Okta SSO login) to request scoped cluster certificates for the agent. The operator already has access to the clusters — the framework just requests narrower roles than the operator would use directly.
-- The Vault provider uses the operator's existing Teleport-brokered Vault session to generate scoped tokens.
-
-This mode prioritizes low friction. The operator shouldn't need to set up new infrastructure to get started — they should be able to point the framework at their existing sessions and be running within minutes. The bootstrap credentials are inherently tied to the operator's identity and permissions, which is acceptable for solo use.
-
-#### Organizational Mode
-
-When the framework is adopted by a team or organization, bootstrap credentials move from personal sessions to dedicated service identities managed by the platform/infrastructure team.
-
-- The GitHub provider uses a centrally managed GitHub App installed across the organization's repos, with the private key stored in a secret manager.
-- The Kubernetes/Teleport provider uses a Teleport machine identity (bot) with roles specifically designed for credential delegation — capable of requesting scoped certificates for agents, but not capable of direct cluster access itself.
-- The Vault provider uses a dedicated Vault AppRole or machine identity with policies that allow generating scoped tokens but not direct secret access.
-- Operator override policies are defined centrally and apply to all operators in the organization.
-
-#### Transition Path
-
-The transition from solo to organizational mode should not require changes to task manifests, provider configurations, or the tier system. Two things change: the bootstrap credential source and the broker's deployment model.
-
-**Bootstrap credentials** move from personal sessions to organizational service identities (described above).
-
-**The broker / MCP server** moves from the operator's laptop to a shared service:
-
-1. **Solo mode** — the broker runs as a local process on the operator's machine. The MCP server is exposed to the agent's devcontainer via a bind-mounted Unix socket or local network. The operator's machine is the trust boundary — bootstrap credentials live there, approval prompts appear there.
-2. **Organizational mode** — the broker runs as a service, potentially deployed into a Kubernetes cluster. The MCP server is accessible to agent containers over the network (authenticated and encrypted). Bootstrap credentials come from the cluster's secret management (Vault, Kubernetes secrets). Approval prompts route to operators via a web UI, Slack integration, or similar. Audit logs go to a centralized logging system rather than local files. Classification policies and operator overrides are managed centrally and apply to all operators.
-
-The transition path:
-
-1. Solo operator starts using the framework — broker runs locally, MCP server on a Unix socket, bootstrap credentials from local sessions.
-2. They find it valuable, want to share it with the team.
-3. The broker is deployed as a service in a Kubernetes cluster. The MCP server endpoint moves from a local socket to a network address — but the MCP interface is identical. Agent containers are configured to point at the service endpoint instead of a local socket.
-4. Bootstrap credentials are migrated from local sessions to organizational service identities.
-5. Centralized operator override policies are added to enforce org-wide standards.
-6. Everything else stays the same — same providers, same manifest format, same tier system, same `request_access` MCP calls from the agent's perspective.
-
-The agent doesn't know or care whether the MCP server is a local process on the operator's laptop or a service in a Kubernetes cluster. It makes the same `request_access` calls and gets the same metadata responses. This is analogous to how Terraform works: you start with personal AWS credentials and a local state file, then eventually move to a shared state backend and assume-role chains — but the `.tf` files don't change.
-
-#### Design Implications
-
-**Provider interface:** The provider interface must not assume either mode. A provider receives a bootstrap credential configuration (which could be "use this local session" or "use this service identity endpoint") and uses it to issue scoped credentials. The provider doesn't know or care whether the bootstrap credential came from a personal `tsh` login or a Teleport bot.
-
-**Agent-to-broker authentication:** The framework uses mTLS to authenticate agent containers to the broker. When launching a devcontainer, the framework generates a short-lived client certificate scoped to the task (task ID encoded in the subject/SAN) and injects it into the container alongside the MCP server configuration. The broker validates this certificate on every request, binding each `request_access` call to a specific approved manifest. This is consistent across both modes — in solo mode the framework acts as its own CA locally, in organizational mode the CA could be Teleport or another internal PKI. The client certificate is not a credential the model sees or manages — it is part of the container's infrastructure, like the MCP socket itself.
+Where bootstrap credentials come from changes as adoption scales (see Adoption Phases), but the provider interface must not assume any particular mode. A provider receives a bootstrap credential configuration (which could be "use this local session" or "use this service identity endpoint") and issues scoped credentials from it. The provider doesn't know or care whether the bootstrap credential came from a personal `tsh` login or a Teleport bot.
 
 The provider configuration supports pluggable bootstrap credential sources:
 
@@ -430,12 +385,12 @@ The provider configuration supports pluggable bootstrap credential sources:
 providers:
   kubernetes:
     bootstrap:
-      # Solo mode: use operator's existing tsh session
+      # Solo: use operator's existing tsh session
       source: local_tsh_session
 
   github:
     bootstrap:
-      # Solo mode: App key on local filesystem
+      # Solo: App key on local filesystem
       source: file
       path: ~/.config/wardlock/github-app-key.pem
       app_id: 12345
@@ -445,17 +400,19 @@ providers:
 providers:
   kubernetes:
     bootstrap:
-      # Org mode: dedicated Teleport bot identity
+      # Org: dedicated Teleport bot identity
       source: teleport_bot
       token_path: /var/lib/teleport/bot/token
 
   github:
     bootstrap:
-      # Org mode: App key from Vault
+      # Org: App key from Vault
       source: vault
       vault_path: secret/data/github-app/private-key
       app_id: 12345
 ```
+
+**Agent-to-broker authentication:** The framework uses mTLS to authenticate agent containers to the broker. When launching an isolated environment, the framework generates a short-lived client certificate scoped to the task (task ID encoded in the subject/SAN) and injects it alongside the MCP server configuration. The broker validates this certificate on every request, binding each `request_access` call to a specific approved manifest. In solo mode the framework acts as its own CA locally; in organizational mode the CA could be Teleport or another internal PKI. The client certificate is not a credential the model sees or manages — it is part of the environment's infrastructure, like the MCP socket itself.
 
 ---
 
@@ -1041,7 +998,15 @@ The implementation phases above describe what gets built. The adoption phases be
 
 The operator runs the broker on their laptop. Agents run locally (localhost isolation provider). The CLI communicates with the broker over HTTP on localhost — no auth, no TLS, but the API contract is real from day one. This means the operator-facing API and the agent-facing MCP interface are separate surfaces from the start: agents talk MCP via Unix socket, the CLI talks HTTP to the broker's API.
 
-**Architecture:** Single process. Broker + MCP server + credential providers all in one. The trust boundary is the operator's machine. Bootstrap credentials (GitHub App key, Teleport join token) live in local config. Approval prompts appear in the operator's terminal.
+**Architecture:** Single process. Broker + MCP server + credential providers all in one. The trust boundary is the operator's machine. Approval prompts appear in the operator's terminal.
+
+**Bootstrap credentials** are derived from the operator's existing sessions — no new infrastructure required. The operator should be able to point the framework at what they already have and be running within minutes:
+
+- The GitHub provider uses a GitHub App the operator installs on their own orgs. The App's private key lives on the operator's machine.
+- The Kubernetes/Teleport provider uses the operator's existing `tsh` session (from their normal SSO login) to request scoped cluster certificates. The operator already has access — the framework just requests narrower roles.
+- The Vault provider uses the operator's existing Teleport-brokered Vault session to generate scoped tokens.
+
+Bootstrap credentials are inherently tied to the operator's identity and permissions, which is acceptable for solo use.
 
 **Why the API matters early:** The CLI-to-broker API exists and is tested before auth, TLS, durable state, or any hosted infrastructure enters the picture. Same rationale as the localhost isolation provider — get the interface working before the real implementation.
 
@@ -1056,7 +1021,7 @@ The operator moves the broker to cloud infrastructure (a VM, a container, a smal
 **This is the first real architectural inflection.** Everything that was trivially local now needs to work over the network:
 
 - **Auth between CLI and broker.** In solo mode, this could be a simple pre-shared token or mTLS cert. Nothing fancy — it's one person.
-- **Bootstrap credentials move out of the laptop.** The GitHub App key, Teleport join token, etc. now live wherever the broker runs — a secrets manager or encrypted config.
+- **Bootstrap credentials move out of the laptop.** The GitHub App key, Teleport join token, etc. now live wherever the broker runs — a secrets manager or encrypted config. The same operator credentials, just stored remotely instead of locally.
 - **Approval flow changes.** The operator can't get a terminal prompt on a remote broker. Approvals need to happen through the CLI (polling or push), a web UI, or notifications.
 - **Durable state.** The broker needs to survive restarts. Active credentials, audit log, approval queue need persistent storage. In Adoption Phase 1 these can be in-memory.
 - **TLS.** The CLI-to-broker API is now over the internet.
@@ -1072,10 +1037,11 @@ Multiple people in the org use the CLI to launch agents and request credentials.
 **Architecture changes:**
 
 - **CLI authenticates via OIDC.** Device flow or browser redirect. The CLI gets an ID token, presents it to the broker. The broker validates against the org's IdP.
-- **Authorization becomes real.** Who can launch what tasks? Who can approve what tier of credential? The broker needs a role/policy model mapping OIDC claims (groups, roles) to Wardlock permissions.
+- **Bootstrap credentials move from personal sessions to organizational service identities.** The GitHub provider uses a centrally managed GitHub App installed across the organization's repos, with the private key in a secret manager. The Kubernetes/Teleport provider uses a Teleport machine identity (bot) with roles designed for credential delegation — capable of requesting scoped certificates for agents, but not capable of direct cluster access itself. The Vault provider uses a dedicated AppRole or machine identity.
+- **Authorization becomes real.** Who can launch what tasks? Who can approve what tier of credential? The broker needs a role/policy model mapping OIDC claims (groups, roles) to Wardlock permissions. Operator override policies are defined centrally and apply to all operators.
 - **Audit attribution matters.** Every credential request is tied to an authenticated identity. The audit log goes from "the operator did X" to "alice@company.com's agent requested X."
 - **Credential scoping may be identity-dependent.** Alice can request GitHub tokens for repos she has access to. Bob can't request tokens for Alice's repos. The broker may need to map OIDC identity to allowed credential scopes.
-- **The broker becomes a shared service.** Needs proper uptime, monitoring, possibly HA.
+- **The broker becomes a shared service.** Needs proper uptime, monitoring, possibly HA. Audit logs go to a centralized logging system rather than local files.
 
 ---
 
@@ -1101,6 +1067,8 @@ The biggest architectural jumps:
 2. **Phase 3 → 4**: Multi-user to org orchestration forces clustering, API stability, and multi-tenancy.
 
 Phases 1-2 are solo practitioner — buildable and validatable without organizational buy-in. Phase 3 is the "convince your team" phase. Phase 4 is the "convince platform engineering" phase.
+
+**What stays the same across all phases:** The agent doesn't know or care whether the broker is a local process or a clustered service. It makes the same `request_access` MCP calls and gets the same metadata responses. Task manifests, provider configurations, and the tier system are stable across transitions — what changes is the bootstrap credential source, the broker's deployment model, and the auth layer.
 
 ---
 
