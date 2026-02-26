@@ -285,6 +285,32 @@ Example bundles by provider:
 }
 ```
 
+Decoded injection contents for the GitHub example above (not part of the bundle — shown here for readability):
+
+`.config/git/wlk-credential-helper`:
+```bash
+#!/bin/sh
+# Wardlock git credential helper
+# Returns the scoped GitHub App installation token for matching HTTPS URLs
+case "$1" in
+  get)
+    echo "protocol=https"
+    echo "host=github.com"
+    echo "username=x-access-token"
+    echo "password=ghs_xxxxxxxxxxxx"
+    ;;
+esac
+```
+
+`.gitconfig.d/wardlock.inc`:
+```ini
+[credential]
+	helper = !~/.config/git/wlk-credential-helper
+[user]
+	name = wardlock[bot]
+	email = 12345+wardlock[bot]@users.noreply.github.com
+```
+
 **Kubernetes:**
 ```json
 {
@@ -305,6 +331,32 @@ Example bundles by provider:
     "note": "kubectl configured for cluster customer-a-staging with readonly access."
   }
 }
+```
+
+Decoded injection contents for the Kubernetes example above:
+
+`.kube/config`:
+```yaml
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: <Teleport Proxy CA>
+    server: https://teleport.example.com:443
+    tls-server-name: kube-teleport-proxy-alpn.teleport.example.com
+  name: customer-a-staging
+contexts:
+- context:
+    cluster: customer-a-staging
+    user: customer-a-staging
+  name: customer-a-staging
+current-context: customer-a-staging
+users:
+- name: customer-a-staging
+  user:
+    client-certificate-data: <Teleport-issued short-lived cert>
+    client-key-data: <private key>
+
 ```
 
 The `metadata.injected` field is intentionally a flat key-value map rather than a structured type — each provider defines what keys are meaningful for its domain. The broker doesn't interpret these; it passes them through to the agent.
