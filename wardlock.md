@@ -1045,6 +1045,8 @@ The operator runs the broker on their laptop. Agents run locally (localhost isol
 
 **Why the API matters early:** The CLI-to-broker API exists and is tested before auth, TLS, durable state, or any hosted infrastructure enters the picture. Same rationale as the localhost isolation provider — get the interface working before the real implementation.
 
+**Self-documenting API:** The broker API should be self-documenting from day one. An OpenAPI spec generated from the actual route definitions (not hand-maintained separately) ensures docs and implementation can't drift. The broker serves interactive API documentation (Swagger UI or equivalent) at a well-known path — hit `/docs` on a running broker and you see the full API with try-it-out capability. This is important for adoption at every phase: solo practitioners get immediate discoverability, and platform engineering teams integrating in Adoption Phase 4 can discover the API from the running broker rather than reading external documentation that may be stale.
+
 ---
 
 ### Adoption Phase 2: Solo Practitioner, Remote Broker
