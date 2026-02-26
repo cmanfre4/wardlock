@@ -1037,7 +1037,7 @@ Agent receives:
 
 These must be answered before Phase 3 implementation can begin. Phases 1 and 2 can proceed without them.
 
-1. **Provider plugin protocol** — what is the exact protocol between the TypeScript broker and Go provider plugins? gRPC (like Terraform's go-plugin)? JSON over stdin/stdout? The provider contract interface is defined (see Provider Contract under Credential Brokering), but the transport needs to be decided.
+1. **Provider plugin protocol** — provider plugins run on workers, not the control plane (see Broker Decomposition under Adoption Phases). The protocol is between a worker process and the provider plugin it loads. Options: Go function interface compiled into the worker binary (simplest), or a subprocess protocol like JSON over stdin/stdout (if plugin isolation is desired). The provider contract interface is defined (see Provider Contract under Credential Brokering), but the loading mechanism needs to be decided.
 
 2. **Devcontainer configuration** — the framework generates a `devcontainer.json` from the task manifest, mapping credential providers to devcontainer features (e.g., GitHub provider → `github-cli` feature, Kubernetes provider → `kubectl-helm-minikube` feature + `tsh`). For Phase 3, the mapping from providers to features can be hardcoded. Open questions: should the operator be able to add additional features beyond what the providers require (e.g., language runtimes, editors)? Should the framework support a base devcontainer.json that gets extended per task?
 
@@ -1126,8 +1126,8 @@ As load increases, the single broker process decomposes into component parts. Th
 1. MCP server (agent-facing)
 2. Operator API (CLI-facing)
 3. JWKS endpoint (backend-facing)
-4. Isolation provider orchestration (launch, inject, teardown)
-5. Credential provider orchestration (issue, revoke)
+4. Isolation job routing (launch, inject, teardown — executed by isolation workers)
+5. Credential job routing (issue, revoke — executed by credential workers)
 6. Approval workflow (tier evaluation, policy, human approval queue)
 7. Credential lifecycle (TTL tracking, expiry, revocation)
 8. Certificate authority (mTLS certs for agents)
@@ -1136,10 +1136,10 @@ As load increases, the single broker process decomposes into component parts. Th
 
 **Natural service boundaries:**
 
-- **Control plane** — the decision-making core. API, approval workflow, policy evaluation, audit, CA, JWKS endpoint. Stateful, owns the database. Holds the JWT signing key and backend credentials (GitHub App key, etc.). This is the trust anchor.
+- **Control plane** — the decision-making core. API, approval workflow, policy evaluation, audit, CA, JWKS endpoint. Stateful, owns the database. Holds the JWT signing key. **Provider-agnostic** — the control plane does not load or run provider plugins, does not need provider dependencies, and does not need network access to backend systems. It knows "this job needs the `github` credential provider" and routes accordingly. This is the trust anchor.
 - **MCP gateway** — stateless proxy between agents and the control plane. Routes `request_access` calls, streams responses. Scales horizontally.
-- **Credential workers** — handle credential provider communication (issue/revoke). Stateless, pull jobs from a queue, return results. Scale independently per provider.
-- **Isolation workers** — handle isolation provider communication (launch environment, inject bundle, teardown). Also stateless and queue-driven. Scale independently per isolation backend.
+- **Credential workers** — load and run **credential provider plugins** (the Go binaries that know how to talk to GitHub, Teleport, Vault). Stateless, pull jobs from a queue, return results. Scale independently per provider. Workers can be general (all provider plugins installed) or specialized (dedicated worker pools per provider).
+- **Isolation workers** — load and run **isolation provider plugins** (the binaries that know how to write files into containers, manage Docker, manage K8s pods). Also stateless and queue-driven. Scale independently per isolation backend.
 
 **Worker credential flow — workers never hold long-lived secrets:**
 
@@ -1178,6 +1178,8 @@ The control plane depends on three infrastructure interfaces:
 The in-memory implementations should behave like the real ones — async returns (promises, not synchronous), serialize/deserialize data (catch accidental object reference sharing). This prevents surprises when swapping to real backends.
 
 In Phase 1, the "workers" are just async functions in the same process. The queue is an event emitter. The state store is a Map. The encryption provider uses a local RSA key pair. The decomposition exists at the interface level, not the deployment level — same pattern as the localhost isolation provider.
+
+**Implications for provider plugins:** Provider plugins run on workers, not the control plane. This means provider updates don't touch the control plane — ship a new version of the GitHub provider binary and only the credential workers need to be updated. It also clarifies the provider plugin protocol: the protocol is between a worker process and the provider plugin it loads, not between the control plane and a remote plugin over gRPC. This could be as simple as a Go function interface compiled into the worker binary, or a subprocess protocol if plugin isolation is desired.
 
 ---
 
