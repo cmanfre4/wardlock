@@ -396,7 +396,32 @@ The broker needs its own identity, permissions, and authentication mechanism for
 
 The broker's identity for each backend should follow least privilege — it should be able to *delegate* scoped credentials but not necessarily have direct access itself. A Teleport bot that can request `kube-agent-readonly` certificates but can't itself kubectl into the cluster.
 
-How the broker authenticates and whose identity it uses changes as adoption scales (see Adoption Phases). The provider interface must not assume any particular mode — a provider receives an identity configuration (which could be "use this local session" or "use this service identity endpoint") and uses it. The provider doesn't know or care whether the identity came from a personal `tsh` login or a Teleport bot.
+#### Broker as Identity Issuer (JWT/OIDC)
+
+For backends that support it, the broker can authenticate by issuing its own short-lived, scoped JWTs signed with a trusted private key. Backends verify these JWTs against the broker's JWKS endpoint. The broker becomes its own identity issuer — its own IdP, essentially.
+
+**Backends with native JWT/OIDC trust:**
+
+| Backend | How it works |
+|---|---|
+| Teleport | Register the broker as a trusted OIDC issuer. Teleport accepts broker-signed JWTs to issue scoped certificates. Replaces the tbot join token model. |
+| Kubernetes | Native OIDC token authentication (`--oidc-issuer-url`). The broker issues JWTs that K8s clusters accept directly. |
+| Vault | JWT/OIDC auth method. The broker signs a JWT, Vault verifies against the broker's JWKS, issues a scoped Vault token. |
+| AWS | OIDC federation via IAM Identity Provider. The broker issues JWTs that assume IAM roles via `sts:AssumeRoleWithWebIdentity`. |
+
+**Backends that don't support JWKS verification** (like the GitHub API, which has its own App JWT flow) fall back to the existing per-backend auth mechanisms.
+
+This scales naturally with adoption:
+
+- **Phase 1**: Broker signs JWTs with a local key. JWKS endpoint on localhost. Backends configured to trust it locally.
+- **Phase 2**: Same key, but the JWKS endpoint is now reachable over the network. Backends trust the broker's remote JWKS URL.
+- **Phase 3-4**: Signing key managed properly (HSM, KMS, rotated). JWKS endpoint is HA. Backends across the org trust it.
+
+The broker's JWT signing key and its mTLS CA are two facets of the same identity infrastructure — the broker is a trust anchor for both inbound connections (agent-to-broker mTLS) and outbound connections (broker-to-backend JWT).
+
+#### Pluggable Identity Sources
+
+How the broker authenticates and whose identity it uses changes as adoption scales (see Adoption Phases). The provider interface must not assume any particular mode — a provider receives an identity configuration (which could be "use this local session", "use this service identity endpoint", or "sign a JWT with this key") and uses it. The provider doesn't know or care whether the identity came from a personal `tsh` login, a Teleport bot, or a broker-signed JWT.
 
 The provider configuration supports pluggable identity sources:
 
@@ -425,13 +450,13 @@ isolation_providers:
 credential_providers:
   kubernetes:
     identity:
-      # Org: dedicated Teleport bot identity
-      source: teleport_bot
-      token_path: /var/lib/teleport/bot/token
+      # Org: broker-signed JWT verified against JWKS
+      source: broker_jwt
+      audience: https://teleport.example.com
 
   github:
     identity:
-      # Org: App key from Vault
+      # GitHub doesn't support JWKS — use App key from Vault
       source: vault
       vault_path: secret/data/github-app/private-key
       app_id: 12345
@@ -439,9 +464,9 @@ credential_providers:
 isolation_providers:
   kubernetes:
     identity:
-      # Org: service account with pod management permissions
-      source: kubeconfig
-      path: /var/run/secrets/kubernetes.io/serviceaccount/token
+      # Org: broker-signed JWT for K8s OIDC auth
+      source: broker_jwt
+      audience: https://kubernetes.default.svc
 ```
 
 **Agent-to-broker authentication:** The framework uses mTLS to authenticate agents to the broker. When launching an isolated environment, the framework generates a short-lived client certificate scoped to the task (task ID encoded in the subject/SAN) and injects it alongside the MCP server configuration. The broker validates this certificate on every request, binding each `request_access` call to a specific approved manifest. In solo mode the framework acts as its own CA locally; in organizational mode the CA could be Teleport or another internal PKI. The client certificate is not a credential the model sees or manages — it is part of the environment's infrastructure, like the MCP socket itself.
