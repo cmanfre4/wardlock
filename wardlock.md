@@ -1117,6 +1117,60 @@ The org's own automation systems (CI/CD pipelines, internal platforms, custom or
 
 ---
 
+### Broker Decomposition at Scale
+
+As load increases, the single broker process decomposes into component parts. The decomposition follows the principle: **the control plane makes decisions, workers execute them.**
+
+**The broker's full responsibilities:**
+
+1. MCP server (agent-facing)
+2. Operator API (CLI-facing)
+3. JWKS endpoint (backend-facing)
+4. Isolation provider orchestration (launch, inject, teardown)
+5. Credential provider orchestration (issue, revoke)
+6. Approval workflow (tier evaluation, policy, human approval queue)
+7. Credential lifecycle (TTL tracking, expiry, revocation)
+8. Certificate authority (mTLS certs for agents)
+9. Audit logging
+10. API documentation serving
+
+**Natural service boundaries:**
+
+- **Control plane** — the decision-making core. API, approval workflow, policy evaluation, audit, CA, JWKS endpoint. Stateful, owns the database. Holds the JWT signing key and backend credentials (GitHub App key, etc.). This is the trust anchor.
+- **MCP gateway** — stateless proxy between agents and the control plane. Routes `request_access` calls, streams responses. Scales horizontally.
+- **Credential workers** — handle credential provider communication (issue/revoke). Stateless, pull jobs from a queue, return results. Scale independently per provider.
+- **Isolation workers** — handle isolation provider communication (launch environment, inject bundle, teardown). Also stateless and queue-driven. Scale independently per isolation backend.
+
+**Worker credential flow — workers never hold long-lived secrets:**
+
+1. Control plane approves a credential request and enqueues a job with a **job ID** (never credentials in the queue)
+2. Worker picks up the job ID from the queue
+3. Worker authenticates to the control plane (workers have their own mTLS cert or long-lived identity)
+4. Worker requests credentials for the job: "I picked up job X, give me what I need"
+5. Control plane verifies the worker's identity, verifies the job is legitimately assigned, and issues a short-lived scoped JWT for the specific operation
+6. Worker presents the JWT to the backend (for backends supporting JWKS verification) or receives a short-lived token the control plane obtained from the backend (for backends like GitHub that don't support JWKS)
+7. Worker does the work, returns the result to the control plane via the state store
+
+Credentials are never placed in the queue. The JWT is issued just-in-time over a direct authenticated channel when the worker is ready to use it. If a worker is compromised, the attacker gets a JWT that can do one specific thing and expires shortly. Spinning up more workers requires no secret distribution — they authenticate to the control plane and get scoped JWTs per job.
+
+**Pluggable infrastructure backends:**
+
+The control plane depends on two infrastructure interfaces:
+
+- **StateStore**: `get`, `put`, `query`, `delete` — holds active credentials, approval queue, audit log, task state.
+- **WorkQueue**: `enqueue`, `dequeue`, `ack`, `nack` — distributes jobs to workers.
+
+| Adoption Phase | StateStore | WorkQueue |
+|---|---|---|
+| Phase 1 (local) | `InMemoryStateStore` (or SQLite for persistence) | `InMemoryWorkQueue` (async function calls within the same process) |
+| Phase 2+ (remote) | `DynamoDBStateStore` | `SQSWorkQueue` |
+
+The in-memory implementations should behave like the real ones — async returns (promises, not synchronous), serialize/deserialize data (catch accidental object reference sharing). This prevents surprises when swapping to real backends.
+
+In Phase 1, the "workers" are just async functions in the same process. The queue is an event emitter. The state store is a Map. The decomposition exists at the interface level, not the deployment level — same pattern as the localhost isolation provider.
+
+---
+
 ### Key Transitions
 
 The biggest architectural jumps:
