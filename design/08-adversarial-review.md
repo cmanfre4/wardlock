@@ -14,11 +14,11 @@ Adversarial review agents serve as an automated security review layer for high-b
 - Does the requested resource and permission level align with the stated task?
 - Is the scope of the request as narrow as it could be?
 - Is there a less risky way to accomplish what the agent is trying to do?
-- Does the request represent an escalation beyond what the [task manifest](07-task-manifest.md) anticipated?
+- Does the request represent an escalation beyond what the task manifest anticipated?
 
 ## Cost Considerations
 
-Each adversarial review is a few API calls. For high-blast-radius operations (production deployments, IAM changes, infrastructure modifications), this cost is trivial relative to the risk being mitigated. The [tiered model](06-tiered-approval.md) ensures adversarial review only fires on operations that warrant it.
+Each adversarial review is a few API calls. For high-blast-radius operations (production deployments, IAM changes, infrastructure modifications), this cost is trivial relative to the risk being mitigated. The tiered model ensures adversarial review only fires on operations that warrant it.
 
 ---
 

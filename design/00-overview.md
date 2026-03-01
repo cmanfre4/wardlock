@@ -21,50 +21,78 @@ This framework is primarily concerned with complex tasks that:
 
 Single-repo local work is largely out of scope. Git history provides sufficient recovery, and existing agent tooling (worktrees, permission modes) handles this adequately.
 
+## Key Design Principles
+
+**Secrets never enter the model's context through the framework.** The credential management flow returns metadata about issued credentials (status, expiry, what was configured) — not actual secret material. Secrets are injected into the agent's filesystem as a side effect of the `request_access` call. The model needs the *capability* ("kubectl is now configured for cluster X"), not the *secret* (the certificate bytes). This ensures the default flow doesn't leak secrets through model outputs, conversation logs, or prompt injection attacks.
+
+**Credential providers and isolation providers are fully decoupled.** Credential providers produce declarative bundles describing what needs to exist in the container. Isolation providers materialize those bundles. A GitHub credential provider doesn't know whether it's running on localhost or in a Kubernetes pod — it produces the same bundle either way. This follows the Terraform provider model: a core framework handles common concerns while provider plugins implement a consistent interface for each backend system.
+
+**The agent doesn't know or care about the broker's deployment model.** It makes the same `request_access` MCP calls and gets the same metadata responses whether the broker is a local process on the operator's laptop or a clustered service behind a load balancer. Task manifests, provider configurations, and the tier system are stable across all deployment modes — what changes is the broker's identity sources, deployment model, and auth layer.
+
 ## Core Architecture
 
-The framework has three pillars: **Isolation**, **[Credential Brokering](02-credential-brokering.md)**, and **Approval & Audit**.
+The framework has two API surfaces and two provider types, connected by a credential broker.
 
-The design follows the Terraform provider model: a core framework handles common concerns (isolation lifecycle, approval flows, audit logging, credential injection and revocation), while provider plugins implement a consistent interface for each backend system.
+**API surfaces:**
 
-## Design Components
+- **MCP server** (agent-facing) — exposes `request_access`, `revoke`, and `list_active` as MCP tools. The agent discovers and calls them like any other MCP server. This is the primary integration point.
+- **HTTP API** (operator-facing) — the CLI and other tooling communicate with the broker over HTTP. This is a separate surface from the agent's MCP interface, present from day one. Self-documenting via OpenAPI spec.
 
-| Component | File |
-|---|---|
-| Isolation | [01-isolation.md](01-isolation.md) |
-| Credential Brokering | [02-credential-brokering.md](02-credential-brokering.md) |
-| Credential Providers | [03-credential-providers.md](03-credential-providers.md) |
-| Credential Injection | [04-credential-injection.md](04-credential-injection.md) |
-| Broker Identity | [05-broker-identity.md](05-broker-identity.md) |
-| Tiered Approval | [06-tiered-approval.md](06-tiered-approval.md) |
-| Task Manifest & Approval Budgets | [07-task-manifest.md](07-task-manifest.md) |
-| Adversarial Review Agents | [08-adversarial-review.md](08-adversarial-review.md) |
-| Audit Logging | [09-audit-logging.md](09-audit-logging.md) |
-| Implementation Phases | [10-implementation-phases.md](10-implementation-phases.md) |
-| Adoption & Scaling | [11-adoption-and-scaling.md](11-adoption-and-scaling.md) |
-| Open Questions | [12-open-questions.md](12-open-questions.md) |
+**Provider types:**
 
----
+- **Credential providers** — know how to issue and revoke scoped, time-limited credentials for a specific backend (GitHub, Teleport, AWS). They produce credential bundles and revocation bundles against a common provider contract.
+- **Isolation providers** — know how to run an agent in an isolated environment and how to materialize credential bundles in that environment. They implement injection and cleanup for each injection type (`file`, `env`) using the mechanics of their container or VM technology.
+
+**The broker** sits between these, orchestrating the credential lifecycle: routing requests to credential providers, evaluating approval tiers, handing bundles to isolation providers for injection, tracking expiry, and logging everything. It never interprets or logs secret material — bundles pass through as opaque bytes.
+
+**Pluggable infrastructure:** The broker's internal state (credential records, audit log, approval queue) is persisted through three pluggable interfaces — StateStore, WorkQueue, and EncryptionProvider. In the simplest deployment these are in-memory data structures. At scale they become DynamoDB, SQS, KMS or equivalent. The decomposition exists at the interface level from day one.
+
+**Broker decomposition at scale:** The single broker process naturally decomposes into a control plane (decisions, policy, audit, CA), an MCP gateway (stateless proxy), credential workers (run credential provider plugins), and isolation workers (run isolation provider plugins). The control plane never touches secret material. Workers authenticate per-job and hold no long-lived secrets.
+
+## Adoption Modes
+
+The framework is designed to support four progressive adoption modes. Each mode introduces architectural requirements, but the agent-facing interface stays the same across all of them:
+
+1. **Solo practitioner, local broker** — single process on the operator's laptop. Broker identity derived from the operator's existing sessions (GitHub App key on disk, existing `tsh` login). No auth, no TLS — the trust boundary is the operator's machine.
+
+2. **Solo practitioner, remote broker** — broker moves to cloud infrastructure. Forces real auth, durable state, TLS, and a rethink of the approval UX. The hardest architectural jump because it touches everything.
+
+3. **Multi-practitioner, OIDC auth** — multiple operators share a broker. CLI authenticates via organizational OIDC. Broker identity moves from personal sessions to organizational service identities. Authorization, audit attribution, and identity-scoped credential access become real.
+
+4. **Organizational orchestration** — CI/CD pipelines and internal platforms integrate with the broker directly. Clustering, API stability, multi-tenancy, and delegated approval via policy.
+
+The adoption phases document describes these modes in full detail. The implementation phases document describes the build order to get there.
+
+## Tiered Approval
+
+Not all credential requests carry the same risk. The framework uses a four-tier approval model:
+
+- **Tier 1 (auto-approve)** — read access to non-sensitive resources. Logged, no friction.
+- **Tier 2 (rubber stamp)** — low-risk writes. Auto-approved with enhanced logging and agent self-justification.
+- **Tier 3 (adversarial review)** — high blast radius operations. Reviewed by independent adversarial agents with isolated context before proceeding.
+- **Tier 4 (human approval)** — highest risk, or escalations from Tier 3. Requires explicit operator approval.
+
+Providers supply default tier classifications based on credential scope. Operators override these based on their own environment knowledge (a dev sandbox account might be Tier 2 everywhere; a production cluster might be Tier 4 even for reads on secrets).
+
+Task manifests let operators pre-approve a set of credentials before the task begins, turning the approval UX from "approve every action" into "approve the plan, then only intervene on deviations."
 
 ## Example Workflow
 
-A typical multi-repo infrastructure task:
+In the simplest mode (solo practitioner, local broker, no isolation):
 
-1. **Operator defines task manifest** — declares the repos, clusters, and other systems the task will touch, with expected permission levels.
-2. **Operator reviews and approves the manifest** — this approval covers all declared credentials, regardless of tier.
-3. **Framework launches devcontainer** — generates a `devcontainer.json` from the manifest (including required CLI tool features), starts the container with the broker's MCP server available, and injects startup instructions derived from the manifest.
-4. **Agent requests initial credentials** — following the startup instructions, the agent calls `request_access` via MCP for each credential declared in the manifest. The broker recognizes these as pre-approved and issues them immediately. The agent receives metadata about what was configured (kubectl contexts, git credential helpers, expiry times) and has full awareness of its access scope.
-5. **Agent begins work** — operates within the approved scope, using the tools and contexts configured by the credential responses.
-6. **Agent discovers additional need** — requests access to a resource not in the manifest via the same `request_access` MCP call. The framework evaluates the tier and routes to the appropriate approval path. If within the approval budget, lower-tier requests proceed with logging. If budget is exhausted or the request is high-tier, it escalates.
-7. **High-risk operation** — agent needs to run terraform apply against production. The request goes to adversarial review. Adversarial agents confirm the request aligns with the task. The operation proceeds (or escalates to the operator if there's disagreement).
-8. **Task completes** — all credentials are revoked. An audit summary is generated showing what access was requested, approved, and when. Actual usage auditing is left to the backing systems (GitHub audit log, Kubernetes audit log, CloudTrail, etc.).
+1. Operator starts the broker locally and launches an agent session with the broker's MCP server configured.
+2. Agent calls `request_access` for the credentials it needs. The broker issues scoped, short-lived credentials and injects them into the filesystem. The agent receives metadata about what was configured.
+3. Agent works using the configured tools (git, kubectl, etc.) within the credential scope.
+4. Credentials expire or are revoked when the session ends. Everything is logged.
 
----
+In the full-featured mode (manifest, devcontainer isolation, tiered approval):
 
-## Language Choices
+1. Operator defines a task manifest declaring expected credentials and reviews it.
+2. Framework launches a devcontainer from the manifest with the broker's MCP server available.
+3. Agent requests each credential declared in the manifest — these are pre-approved and issued immediately.
+4. Agent works within approved scope. Mid-task credential requests are evaluated against the tier system and approval budget.
+5. High-risk requests go through adversarial review or escalate to the operator.
+6. Task completes — all credentials revoked, audit summary generated.
 
-Different components use the language best suited to their role. The boundaries between components are well-defined protocols (MCP JSON-RPC, provider plugin protocol), not shared code, so mixed languages work cleanly.
+The framework is useful at every point along this spectrum. The simplest mode replaces the manual credential setup workflow. Each additional capability (manifests, isolation, tiers, adversarial review) adds safety without changing the core interaction pattern.
 
-- **Broker / MCP server**: TypeScript — the official MCP SDK is TypeScript-first, and the broker is fundamentally an MCP server. This is the most important integration to get right.
-- **Credential providers**: Go — natural fit for the plugin model (single binary distribution, Terraform-style go-plugin patterns). Providers are independent processes that speak a protocol to the broker. If deep integration with Teleport client libraries is needed, Go is the only option.
-- **Pre-MVP tools**: TypeScript — shares the language with the broker, so credential scoping code (GitHub JWT flow, tsh wrapping) translates directly into the MVP. The pre-MVP can evolve into a minimal MCP server prototype, becoming the seed of the actual broker rather than throwaway work.

@@ -24,7 +24,7 @@ Not all credential requests carry the same risk. The framework uses a tiered app
 
 **High blast radius operations.**
 
-- Reviewed by one or more independent [adversarial agents](08-adversarial-review.md) before execution
+- Reviewed by one or more independent adversarial agents before execution
 - Adversarial agents receive the task description and the permission request, but NOT the full working context of the requesting agent (context isolation prevents shared poisoning)
 - If adversarial agents unanimously approve, the request proceeds
 - If any adversarial agent denies or agents disagree, the request escalates to Tier 4
@@ -140,7 +140,7 @@ classification_overrides:
     reason: "Controls GitHub Actions permissions via Vault, broad blast radius"
 ```
 
-Override match rules use the same `resource` and `permission` vocabulary as the [broker interface](02-credential-brokering.md) and [task manifest](07-task-manifest.md). The `resource_type` field is an optional secondary match dimension available when a provider exposes sub-resource classification (e.g., Kubernetes resource kinds within a cluster, Vault secret engine paths within a mount). The `ref` field in the GitHub example is also a provider-specific match refinement — providers declare which additional match dimensions they support in their schema, and the override system passes them through.
+Override match rules use the same `resource` and `permission` vocabulary as the broker interface and task manifest. The `resource_type` field is an optional secondary match dimension available when a provider exposes sub-resource classification (e.g., Kubernetes resource kinds within a cluster, Vault secret engine paths within a mount). The `ref` field in the GitHub example is also a provider-specific match refinement — providers declare which additional match dimensions they support in their schema, and the override system passes them through.
 
 ### Classification Dimensions
 

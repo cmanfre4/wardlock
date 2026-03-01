@@ -2,16 +2,27 @@
 
 These are cross-cutting open questions that span multiple components. Component-specific open questions are co-located with their respective design documents:
 
-- [Credential Brokering — MCP Integration Sub-questions](02-credential-brokering.md#mcp-integration-sub-questions)
-- [Credential Providers — Provider Contract Sub-questions](03-credential-providers.md#open-questions)
-- [Credential Injection — Injection Sub-questions, Proxy-based Injection](04-credential-injection.md#open-questions)
-- [Broker Identity — Sub-questions](05-broker-identity.md#open-questions)
-- [Tiered Approval — Operator Override Match Schema](06-tiered-approval.md#open-questions)
-- [Task Manifest — Manifest Authoring UX, Wildcard Matching](07-task-manifest.md#open-questions)
-- [Adversarial Review — Adversarial Agent Protocol](08-adversarial-review.md#open-questions)
-- [Implementation Phases — Provider Language Migration](10-implementation-phases.md#open-questions)
+- Credential Brokering — MCP Integration Sub-questions
+- Credential Providers — Provider Contract Sub-questions
+- Credential Injection — Injection Sub-questions, Proxy-based Injection
+- Broker Identity — Sub-questions
+- Tiered Approval — Operator Override Match Schema
+- Task Manifest — Manifest Authoring UX, Wildcard Matching
+- Adversarial Review — Adversarial Agent Protocol
+- Isolation Providers — Contract Sub-questions
 
 ---
+
+## Language Choices
+
+The original design assumed TypeScript for the broker (MCP SDK is TypeScript-first) and Go for credential provider plugins (Terraform-style single-binary distribution, direct Teleport client library access). The boundaries between components are well-defined protocols (MCP JSON-RPC, provider plugin protocol), not shared code, so mixed languages work.
+
+Options:
+- **TypeScript broker, Go providers** — the original plan. Natural MCP integration for the broker, natural plugin model for providers. Requires a protocol boundary between them.
+- **Go throughout** — broker and providers in Go. Single language, single build system, direct function calls between broker and providers in early phases. Requires evaluating Go MCP SDK maturity.
+- **TypeScript throughout** — broker and providers in TypeScript. Simplest to start. Loses single-binary distribution and direct Teleport client library access.
+
+To be informed by real usage and ecosystem maturity. The language choice doesn't affect the architecture — the provider contract, pluggable infrastructure interfaces, and decomposition model are language-agnostic.
 
 ## Multi-Agent Coordination
 
@@ -54,5 +65,5 @@ Possible integrations:
 - Terraform: state rollback or targeted destroy of resources created during a failed task.
 - Kubernetes: rollback to previous deployment revision.
 
-This is likely out of scope for the MVP but worth designing for. The framework's [audit log](09-audit-logging.md) tracks what credentials were issued and when, and the backing systems' own audit logs (GitHub, CloudTrail, Kubernetes audit) track what was actually done with those credentials. Correlating across these systems to determine what to roll back is a significant undertaking and is not a near-term goal.
+This is likely out of scope for the MVP but worth designing for. The framework's audit log tracks what credentials were issued and when, and the backing systems' own audit logs (GitHub, CloudTrail, Kubernetes audit) track what was actually done with those credentials. Correlating across these systems to determine what to roll back is a significant undertaking and is not a near-term goal.
 

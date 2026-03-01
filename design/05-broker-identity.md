@@ -21,7 +21,7 @@ The broker needs its own identity, permissions, and authentication mechanism for
 
 The broker's identity for each backend should follow least privilege — it should be able to *delegate* scoped credentials but not necessarily have direct access itself. A Teleport bot that can request `kube-agent-readonly` certificates but can't itself kubectl into the cluster.
 
-**How isolation backend auth evolves with [adoption phases](11-adoption-and-scaling.md):**
+**How isolation backend auth evolves with adoption phases:**
 
 - **Phase 1 (local)**: Localhost only — implicit, same process, no auth. The broker writes files as the operator's OS user.
 - **Phase 2 (remote)**: The isolation provider moves to Docker or a VM. The broker authenticates to the Docker daemon via Docker API TLS (client cert) or to the VM provider via cloud SDK credentials. These are stored wherever the broker runs (secrets manager, encrypted config).
@@ -62,7 +62,7 @@ The key insight: as the broker moves from local keys to managed key infrastructu
 
 ## Pluggable Identity Sources
 
-How the broker authenticates and whose identity it uses changes as adoption scales (see [Adoption Phases](11-adoption-and-scaling.md)). The provider interface must not assume any particular mode — a provider receives an identity configuration (which could be "use this local session", "use this service identity endpoint", or "sign a JWT with this key") and uses it. The provider doesn't know or care whether the identity came from a personal `tsh` login, a Teleport bot, or a broker-signed JWT.
+How the broker authenticates and whose identity it uses changes as adoption scales (see Adoption Phases). The provider interface must not assume any particular mode — a provider receives an identity configuration (which could be "use this local session", "use this service identity endpoint", or "sign a JWT with this key") and uses it. The provider doesn't know or care whether the identity came from a personal `tsh` login, a Teleport bot, or a broker-signed JWT.
 
 The provider configuration supports pluggable identity sources:
 

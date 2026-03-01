@@ -1,6 +1,6 @@
 # Adoption Phases and Scaling
 
-The [implementation phases](10-implementation-phases.md) describe what gets built. The adoption phases below describe how the deployment model evolves as usage scales from a single practitioner to an organization. Each adoption phase introduces architectural requirements that the implementation must eventually support.
+The implementation phases describe what gets built. The adoption phases below describe how the deployment model evolves as usage scales from a single practitioner to an organization. Each adoption phase introduces architectural requirements that the implementation must eventually support.
 
 ---
 
@@ -10,7 +10,7 @@ The operator runs the broker on their laptop. Agents run locally (localhost isol
 
 **Architecture:** Single process. Broker + MCP server + credential providers all in one. The trust boundary is the operator's machine. Approval prompts appear in the operator's terminal.
 
-**[Broker identity](05-broker-identity.md)** is implicit — derived from the operator's existing sessions. No new infrastructure required. The operator should be able to point the framework at what they already have and be running within minutes:
+**Broker identity** is implicit — derived from the operator's existing sessions. No new infrastructure required. The operator should be able to point the framework at what they already have and be running within minutes:
 
 - The GitHub provider uses a GitHub App the operator installs on their own orgs. The App's private key lives on the operator's machine.
 - The Kubernetes/Teleport provider uses the operator's existing `tsh` session (from their normal SSO login) to request scoped cluster certificates. The operator already has access — the framework just requests narrower roles.
@@ -64,7 +64,7 @@ The org's own automation systems (CI/CD pipelines, internal platforms, custom or
 
 - **The broker API becomes a first-class integration surface.** Service accounts authenticate via OIDC client credentials flow or mTLS. API stability and versioning matter.
 - **Clustering.** Multiple broker instances sharing state. Leader election or shared database for credential lifecycle, approval queues, audit log.
-- **Delegated approval.** Orchestration systems pre-approve certain credential patterns via policy rather than requiring human approval. The [tier system](06-tiered-approval.md) becomes policy-driven: "CI pipelines from this service account auto-approve Tier 1-2, escalate Tier 3+."
+- **Delegated approval.** Orchestration systems pre-approve certain credential patterns via policy rather than requiring human approval. The tier system becomes policy-driven: "CI pipelines from this service account auto-approve Tier 1-2, escalate Tier 3+."
 - **Multi-tenancy.** Different teams, different credential scopes, different policies. The broker needs namespace isolation or team-scoped configuration.
 - **Provider scaling.** Many concurrent credential operations. Providers may need connection pooling, rate limiting, circuit breakers for backend system API limits.
 
@@ -84,15 +84,15 @@ As load increases, the single broker process decomposes into component parts. Th
 6. Approval workflow (tier evaluation, policy, human approval queue)
 7. Credential lifecycle (TTL tracking, expiry, revocation)
 8. Certificate authority (mTLS certs for agents)
-9. [Audit logging](09-audit-logging.md)
+9. Audit logging
 10. API documentation serving
 
 **Natural service boundaries:**
 
 - **Control plane** — the decision-making core. API, approval workflow, policy evaluation, audit, CA, JWKS endpoint. Stateful, owns the database. Holds the JWT signing key. **Provider-agnostic** — the control plane does not load or run provider plugins, does not need provider dependencies, and does not need network access to backend systems. It knows "this job needs the `github` credential provider" and routes accordingly. This is the trust anchor.
 - **MCP gateway** — stateless proxy between agents and the control plane. Routes `request_access` calls, streams responses. Scales horizontally.
-- **Credential workers** — load and run **[credential provider](03-credential-providers.md) plugins** (the Go binaries that know how to talk to GitHub, Teleport, Vault). Stateless, pull jobs from a queue, return results. Scale independently per provider. Workers can be general (all provider plugins installed) or specialized (dedicated worker pools per provider).
-- **Isolation workers** — load and run **[isolation provider](01-isolation.md) plugins** (the binaries that know how to write files into containers, manage Docker, manage K8s pods). Also stateless and queue-driven. Scale independently per isolation backend.
+- **Credential workers** — load and run **credential provider plugins** (the Go binaries that know how to talk to GitHub, Teleport, Vault). Stateless, pull jobs from a queue, return results. Scale independently per provider. Workers can be general (all provider plugins installed) or specialized (dedicated worker pools per provider).
+- **Isolation workers** — load and run **isolation provider plugins** (the binaries that know how to write files into containers, manage Docker, manage K8s pods). Also stateless and queue-driven. Scale independently per isolation backend.
 
 **Worker credential flow — workers never hold long-lived secrets:**
 
@@ -147,4 +147,4 @@ The biggest architectural jumps:
 
 Phases 1-2 are solo practitioner — buildable and validatable without organizational buy-in. Phase 3 is the "convince your team" phase. Phase 4 is the "convince platform engineering" phase.
 
-**What stays the same across all phases:** The agent doesn't know or care whether the broker is a local process or a clustered service. It makes the same `request_access` MCP calls and gets the same metadata responses. [Task manifests](07-task-manifest.md), [provider configurations](03-credential-providers.md), and the [tier system](06-tiered-approval.md) are stable across transitions — what changes is the broker's identity sources, deployment model, and auth layer.
+**What stays the same across all phases:** The agent doesn't know or care whether the broker is a local process or a clustered service. It makes the same `request_access` MCP calls and gets the same metadata responses. Task manifests, provider configurations, and the tier system are stable across transitions — what changes is the broker's identity sources, deployment model, and auth layer.
