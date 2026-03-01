@@ -21,7 +21,9 @@ Isolation is modular, providing consistent semantics across varying container an
 
 There are two distinct communication channels:
 
-**Agent-to-broker** (resolved): The agent communicates with the credential broker via MCP. The broker exposes `request_access`, `revoke`, and `list_active` as MCP tools. This is detailed in the [Credential Brokering](02-credential-brokering.md) and Agent-to-Broker Communication sections.
+**Agent-to-broker** (resolved): The agent communicates with the credential broker via MCP. The broker exposes `request_access`, `revoke`, and `list_active` as MCP tools. See [Credential Brokering](02-credential-brokering.md) and [MCP Integration](02-credential-brokering.md#mcp-integration).
+
+**CLI-to-broker** (resolved): The operator's CLI communicates with the broker over HTTP API — a separate surface from the agent's MCP interface. This API exists from [Adoption Phase 1](11-adoption-and-scaling.md#adoption-phase-1-solo-practitioner-local-broker) and is [self-documenting](11-adoption-and-scaling.md#adoption-phase-1-solo-practitioner-local-broker) (OpenAPI spec, Swagger UI at `/docs`).
 
 **Operator-facing** (open): The operator needs visibility into the agent's work and the ability to act on approval prompts. This channel must support:
 

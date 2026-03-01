@@ -5,7 +5,7 @@ Credential injection is a **side effect of the broker's `request_access` call**,
 Injection is a collaboration between three components:
 
 1. **Credential provider** — produces a [credential bundle](03-credential-providers.md#credential-bundle) declaring what needs to exist in the container (files to write, env vars to set) and what metadata to show the agent. The provider is isolation-agnostic — it has no knowledge of how containers work.
-2. **Broker** — orchestrates the flow. Calls the credential provider to get the bundle, hands the entries to the [isolation provider](01-isolation.md) for materialization, and returns only the metadata portion to the agent via the MCP response.
+2. **Broker** — orchestrates the flow. Routes the request to a credential provider, then routes the resulting bundle to an isolation provider for materialization, and returns only the metadata portion to the agent via the MCP response. In the single-process deployment, this is direct function calls. As the broker [decomposes at scale](11-adoption-and-scaling.md#broker-decomposition-at-scale), the control plane routes jobs to credential workers and isolation workers via a work queue.
 3. **Isolation provider** — materializes the bundle in the container. It knows how to write files and set env vars for the specific container technology being used.
 
 This separation keeps credential providers and isolation providers fully decoupled. A GitHub credential provider doesn't need to know whether it's running on localhost or in a remote Kubernetes pod — it produces the same bundle either way. Each isolation provider implements the injection types it supports:
@@ -17,7 +17,7 @@ This separation keeps credential providers and isolation providers fully decoupl
 
 If an isolation provider encounters an injection type it doesn't support, it returns an error. This lets the system add new injection types incrementally without requiring all isolation providers to update simultaneously.
 
-Secrets pass through the broker in memory during this handoff, but this is trusted infrastructure code. The broker treats bundle contents as opaque bytes and does not log or inspect them. The secrets ultimately live on the filesystem where the agent runs — accessible to the agent if it reads the files, but not surfaced through the MCP interface.
+In the single-process deployment, secrets pass through the broker in memory during this handoff. As the broker [decomposes at scale](11-adoption-and-scaling.md#broker-decomposition-at-scale), credential workers encrypt bundles before enqueuing them, and isolation workers decrypt after dequeuing — the control plane never touches plaintext bundle contents. In both cases, the broker treats bundle contents as opaque bytes and does not log or inspect them. The secrets ultimately live on the filesystem where the agent runs — accessible to the agent if it reads the files, but not surfaced through the MCP interface.
 
 The broker completes injection before returning the `request_access` MCP response, so by the time the model sees the "kubectl is now configured" metadata, the kubeconfig is already in place.
 
