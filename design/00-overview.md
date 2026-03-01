@@ -85,14 +85,12 @@ In the simplest mode (solo practitioner, local broker, no isolation):
 3. Agent works using the configured tools (git, kubectl, etc.) within the credential scope.
 4. Credentials expire or are revoked when the session ends. Everything is logged.
 
-In the full-featured mode (manifest, devcontainer isolation, tiered approval):
+As a platform (organizational orchestration, policy-driven approval):
 
-1. Operator defines a task manifest declaring expected credentials and reviews it.
-2. Framework launches a devcontainer from the manifest with the broker's MCP server available.
-3. Agent requests each credential declared in the manifest — these are pre-approved and issued immediately.
-4. Agent works within approved scope. Mid-task credential requests are evaluated against the tier system and approval budget.
-5. High-risk requests go through adversarial review or escalate to the operator.
-6. Task completes — all credentials revoked, audit summary generated.
+1. An orchestration system submits a task manifest to the broker's API, specifying credentials, isolation requirements, and the agent to run.
+2. The broker launches an isolated environment, makes its MCP server available inside it, and starts the agent with startup instructions derived from the manifest.
+3. The agent requests credentials via MCP. Manifest-declared credentials are pre-approved. Out-of-manifest requests are evaluated against tier policy — Tier 1-2 auto-approve per policy, Tier 3 goes to adversarial review, Tier 4 escalates to a human.
+4. Task completes — credentials expire or are actively revoked at the backend. Audit trails are attributed to authenticated identities and available to the organization's logging systems.
 
-The framework is useful at every point along this spectrum. The simplest mode replaces the manual credential setup workflow. Each additional capability (manifests, isolation, tiers, adversarial review) adds safety without changing the core interaction pattern.
+The framework is useful at every point along this spectrum. The simplest mode replaces the manual credential setup workflow. The full-featured mode is infrastructure that an organization's agent orchestration systems build on top of — Wardlock handles credential lifecycle, isolation, and approval policy for each agent so the orchestration layer doesn't have to.
 
