@@ -40,7 +40,7 @@ The framework has two API surfaces and two provider types, connected by a creden
 
 **Provider types:**
 
-- **Credential providers** — know how to issue and revoke scoped, time-limited credentials for a specific backend (GitHub, Teleport, AWS). They produce credential bundles and revocation bundles against a common provider contract.
+- **Credential providers** — know how to issue and revoke scoped, time-limited credentials for a specific backend (GitHub, Teleport, AWS). They produce credential bundles against a common provider contract.
 - **Isolation providers** — know how to run an agent in an isolated environment and how to materialize credential bundles in that environment. They implement injection and cleanup for each injection type (`file`, `env`) using the mechanics of their container or VM technology.
 
 **The broker** sits between these, orchestrating the credential lifecycle: routing requests to credential providers, evaluating approval tiers, handing bundles to isolation providers for injection, tracking expiry, and logging everything. It never interprets or logs secret material — bundles pass through as opaque bytes.

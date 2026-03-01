@@ -37,7 +37,7 @@ Each provider implements a consistent interface that the broker calls to manage 
 - `schema()` — returns the provider's supported resource types, permission levels, and additional match dimensions for overrides.
 - `classify(resource, permission)` → tier — returns the provider's default tier classification for a given request.
 - `issue(resource, permission, duration)` → credential bundle — creates a scoped, time-limited credential and returns a bundle describing what needs to be injected into the container and what metadata to show the agent.
-- `revoke(credential_id)` → revocation bundle — returns the artifacts to remove and any backend-side cleanup (e.g., token invalidation).
+- `revoke(credential_id)` → boolean — invalidates the credential at the backend if possible (e.g., revokes a GitHub token via API). Returns whether backend-side revocation succeeded. Some backends don't support explicit revocation and rely on TTL expiry instead.
 - `validate(resource, permission)` → bool — checks whether the requested resource and permission are valid and the provider can fulfill them.
 
 There is no `renew()` method. Credential renewal flows through the same `request_access` → `issue()` path as the original request, subject to the same approval tier evaluation. The broker revokes the expiring credential and issues a fresh one. This keeps the provider interface simple and ensures renewal doesn't bypass approval controls.
@@ -93,27 +93,7 @@ The `metadata.injected` field is intentionally a flat key-value map rather than 
 
 For example bundles, see the individual provider specs: GitHub, Teleport.
 
-### Revocation Bundle
-
-The `revoke()` method returns a revocation bundle describing what to clean up, using the same injection type system:
-
-```typescript
-interface RevocationBundle {
-  // Typed entries describing what to undo in the container
-  revocations: RevocationEntry[];
-
-  // Whether the provider also invalidated the credential backend-side
-  backend_revoked: boolean;
-}
-
-type RevocationEntry =
-  | { type: "file"; path: string }         // delete this file
-  | { type: "env"; name: string };         // unset this env var
-```
-
-The broker passes the revocation bundle to the isolation provider, which removes the files and unsets env vars. The provider handles backend-side revocation (e.g., invalidating a GitHub token via API) as part of the `revoke()` call itself.
-
-Partial cleanup is acceptable if some artifacts can't be undone (e.g., a token that can only be revoked by TTL expiry). The `backend_revoked` field indicates whether the provider was able to invalidate the credential at the source.
+Credential artifacts (files, env vars) injected into the container are not cleaned up on revocation or expiry. The credential is invalidated at the backend — the files on disk become stale and harmless. When the container exits at task end, everything is destroyed. If the agent hits an expired credential mid-task, it calls `request_access` again for a fresh one.
 
 ---
 

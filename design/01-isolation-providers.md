@@ -31,7 +31,8 @@ Each isolation provider implements a consistent interface that the broker calls 
 ### Credential Injection
 
 - `inject(handle, bundle)` → injection result — materializes a credential bundle in the environment. The bundle contains typed injection entries; the isolation provider implements the mechanics for each type it supports. Returns success or an error if an unsupported injection type is encountered.
-- `cleanup(handle, revocation_bundle)` → cleanup result — removes artifacts described by a revocation bundle from the environment. Deletes files, unsets env vars, and performs any provider-specific cleanup.
+
+Credential artifacts are not cleaned up on revocation or expiry — the credential is invalidated at the backend, and the files on disk become stale. When the container exits at task end, everything is destroyed.
 
 ### Capabilities
 

@@ -75,7 +75,7 @@ npx wlk teleport \
 - A minimal MCP server exposing `request_access` and `list_active` as MCP tools.
 - Two hardcoded providers (GitHub and Teleport) using the Phase 1 credential logic internally.
 - Credential injection as a side effect of the MCP tool call — the MCP response contains metadata only, secrets are written to the filesystem.
-- A **localhost isolation provider** that writes files directly to the operator's filesystem — no containers, no isolation, but it implements the full isolation provider interface and validates the injection/revocation lifecycle.
+- A **localhost isolation provider** that writes files directly to the operator's filesystem — no containers, no isolation, but it implements the full isolation provider interface and validates the injection lifecycle.
 - No tiers, no manifests, no overrides, no mTLS, no container isolation. The operator configures Claude Code to use the MCP server and runs the agent locally.
 
 **What changes from Phase 1**:
@@ -109,7 +109,7 @@ Agent receives:
 
 **Order of work**:
 1. Add MCP server infrastructure to the Phase 1 project (using the official TypeScript MCP SDK)
-2. Implement the localhost isolation provider (file writes, revocation/cleanup)
+2. Implement the localhost isolation provider (file writes, injection lifecycle)
 3. Wrap GitHub credential logic as a `request_access` handler
 4. Wrap Teleport credential logic as a `request_access` handler
 5. Add `list_active` tool for the agent to check current credentials

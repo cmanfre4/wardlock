@@ -110,17 +110,15 @@ As load increases, the single broker process decomposes into component parts. Th
 
 **Separation of duties.** The credential worker can encrypt but not decrypt. The isolation worker can decrypt but not encrypt. This is enforced by the encryption backend's access policies (IAM policies for KMS, Vault policies for Transit). The control plane orchestrates the flow but never touches plaintext bundle contents. Every encrypt and decrypt operation is audited by the encryption backend (CloudTrail for KMS, Vault audit log for Transit).
 
-**Revocation bundles** are stored separately in the control plane's state store. These contain only cleanup instructions (file paths to delete, env var names to unset) — no secret material — and are needed later when credentials expire or are revoked.
-
 Spinning up more workers requires no secret distribution — they authenticate to the control plane and get scoped JWTs per job.
 
 **Pluggable infrastructure backends:**
 
-The control plane's runtime state — active credential records, audit log entries, task manifest and budget state, approval queue, provider configuration references, and revocation bundles — is persisted through pluggable infrastructure interfaces. No secret material is stored in the state store; credential bundles are encrypted in transit between workers and never persist in plaintext.
+The control plane's runtime state — active credential records, audit log entries, task manifest and budget state, approval queue, and provider configuration references — is persisted through pluggable infrastructure interfaces. No secret material is stored in the state store; credential bundles are encrypted in transit between workers and never persist in plaintext.
 
 The control plane depends on three infrastructure interfaces:
 
-- **StateStore**: `get`, `put`, `query`, `delete` — holds credential metadata, approval queue, audit log, task state, revocation bundles. No secret material.
+- **StateStore**: `get`, `put`, `query`, `delete` — holds credential metadata, approval queue, audit log, task state. No secret material.
 - **WorkQueue**: `enqueue`, `dequeue`, `ack`, `nack` — distributes jobs to workers. Encrypted bundles may be attached to injection jobs.
 - **EncryptionProvider**: `encrypt(plaintext) → ciphertext`, `decrypt(ciphertext) → plaintext` — protects credential bundles in transit between workers.
 

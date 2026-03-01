@@ -27,7 +27,6 @@ The broker completes injection before returning the `request_access` MCP respons
 
 ### Credential Injection Sub-questions
 
-- On revocation, the isolation provider removes files and runs cleanup commands from the revocation bundle. But does the agent need to be notified that a credential was revoked, or is it sufficient for the next CLI command to simply fail?
 - If multiple credential bundles write to the same file path (e.g., two Kubernetes clusters both targeting `.kube/config`), how are merges handled? Kubeconfig supports multiple contexts natively, but other tools may not. Should the isolation provider handle merging, or should credential providers use distinct file paths?
 - For the `env` injection type (Phase 3): how does the isolation provider handle rotation for env vars that can't be updated after container start? Options include wrapper scripts, a sidecar that re-exports, or requiring the container to be restarted.
 - **Proxy-based injection type (future):** The framework already operates a CA for mTLS between agent and broker. Could this CA infrastructure be extended to support a TLS-intercepting proxy as an injection type? The proxy would sit between the agent and the network, terminating TLS on the agent side (using dynamically generated certs signed by Wardlock's CA) and establishing new TLS connections to real destinations with real credentials. Two modes of credential injection are possible at the proxy layer:

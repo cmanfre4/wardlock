@@ -5,7 +5,7 @@ No actual isolation. The agent runs directly on the operator's machine. This is 
 ## What It Provides
 
 - A working isolation provider interface for the broker to target.
-- File injection and revocation via direct filesystem writes.
+- File injection via direct filesystem writes.
 - Validation of the full credential lifecycle without container overhead.
 
 ## What It Does Not Provide
@@ -29,4 +29,4 @@ Implicit — the broker runs as the operator's OS user. No authentication needed
 
 Used in Adoption Phase 1 (solo practitioner, local broker). Replaced by real isolation providers as deployment matures.
 
-The localhost provider is architecturally important: it implements the full isolation provider interface so the broker's injection and revocation code paths are exercised from day one, even before containers are involved.
+The localhost provider is architecturally important: it implements the full isolation provider interface so the broker's injection code paths are exercised from day one, even before containers are involved.
