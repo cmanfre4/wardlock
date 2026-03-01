@@ -3,7 +3,7 @@
 These are cross-cutting open questions that span multiple components. Component-specific open questions are co-located with their respective design documents:
 
 - [Credential Brokering — MCP Integration Sub-questions](02-credential-brokering.md#mcp-integration-sub-questions)
-- [Credential Providers — Provider Discovery, Provider Contract Sub-questions](03-credential-providers.md#open-questions)
+- [Credential Providers — Provider Contract Sub-questions](03-credential-providers.md#open-questions)
 - [Credential Injection — Injection Sub-questions, Proxy-based Injection](04-credential-injection.md#open-questions)
 - [Broker Identity — Sub-questions](05-broker-identity.md#open-questions)
 - [Tiered Approval — Operator Override Match Schema](06-tiered-approval.md#open-questions)
@@ -56,14 +56,3 @@ Possible integrations:
 
 This is likely out of scope for the MVP but worth designing for. The framework's [audit log](09-audit-logging.md) tracks what credentials were issued and when, and the backing systems' own audit logs (GitHub, CloudTrail, Kubernetes audit) track what was actually done with those credentials. Correlating across these systems to determine what to roll back is a significant undertaking and is not a near-term goal.
 
-## State and Storage
-
-Where does the framework store its runtime state?
-
-State includes:
-- Active credential records (ID, provider, resource, permission, TTL, task association).
-- Audit log entries.
-- Task manifest and budget state (how many out-of-manifest requests have been made per tier).
-- Provider configuration and [broker identity](05-broker-identity.md) references.
-
-Options range from flat files (simplest, fine for single-operator MVP) to a lightweight database (SQLite) to a proper backend (for multi-operator or multi-machine setups). See also the [pluggable infrastructure backends](11-adoption-and-scaling.md#broker-decomposition-at-scale) discussion for how state storage evolves with adoption phases.

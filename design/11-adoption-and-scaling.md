@@ -116,6 +116,8 @@ Spinning up more workers requires no secret distribution — they authenticate t
 
 **Pluggable infrastructure backends:**
 
+The control plane's runtime state — active credential records, audit log entries, task manifest and budget state, approval queue, provider configuration references, and revocation bundles — is persisted through pluggable infrastructure interfaces. No secret material is stored in the state store; credential bundles are encrypted in transit between workers and never persist in plaintext.
+
 The control plane depends on three infrastructure interfaces:
 
 - **StateStore**: `get`, `put`, `query`, `delete` — holds credential metadata, approval queue, audit log, task state, revocation bundles. No secret material.

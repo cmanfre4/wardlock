@@ -60,6 +60,15 @@ Providers follow the Terraform provider pattern:
 
 Third parties can implement providers for their own backends (GCP, GitLab, Azure, etc.) against the same interface.
 
+## Provider Discovery
+
+How the framework discovers and loads providers evolves with [adoption phases](11-adoption-and-scaling.md):
+
+- **Phase 1-2**: Providers are hardcoded in the broker process. GitHub and Kubernetes credential logic is built directly into the TypeScript broker — no plugin loading, no discovery. The broker knows what providers exist because they're compiled in.
+- **Phase 3+**: Providers are extracted into separate plugin binaries (Go) that run on [credential workers](11-adoption-and-scaling.md#broker-decomposition-at-scale), not the control plane. Workers load the provider plugins they're configured to run. The control plane routes jobs to the right worker pool by provider name — it doesn't need the provider binary itself.
+
+Provider configuration follows the Terraform model: a configuration file declares which providers are available and their connection details (identity sources, backend endpoints). In Phase 1-2 this is the broker's own config. In Phase 3+ the control plane owns provider configuration centrally, and worker pools are deployed with the corresponding plugin binaries. Configuration is versioned alongside the broker's deployment — in organizational mode, it lives in the control plane's config store and applies uniformly across all operators.
+
 ## Provider Contract
 
 Each provider implements a consistent interface that the broker calls to manage credentials:
@@ -69,6 +78,8 @@ Each provider implements a consistent interface that the broker calls to manage 
 - `issue(resource, permission, duration)` → credential bundle — creates a scoped, time-limited credential and returns a bundle describing what needs to be injected into the container and what metadata to show the agent.
 - `revoke(credential_id)` → revocation bundle — returns the artifacts to remove and any backend-side cleanup (e.g., token invalidation).
 - `validate(resource, permission)` → bool — checks whether the requested resource and permission are valid and the provider can fulfill them.
+
+There is no `renew()` method. Credential renewal flows through the same `request_access` → `issue()` path as the original request, subject to the same [approval tier](06-tiered-approval.md) evaluation. The broker revokes the expiring credential and issues a fresh one. This keeps the provider interface simple and ensures renewal doesn't bypass approval controls.
 
 Credential providers are **isolation-agnostic**. They produce declarative bundles describing what needs to exist in the container — they do not write files or configure tools directly. The broker hands the bundle to the [isolation provider](01-isolation.md), which knows how to materialize it in the container (see [Credential Injection](04-credential-injection.md)).
 
@@ -250,19 +261,7 @@ Partial cleanup is acceptable if some artifacts can't be undone (e.g., a token t
 
 ## Open Questions
 
-### Provider Discovery and Configuration
-
-How does the framework discover which providers are available and how they're configured?
-
-Options:
-- A configuration file similar to Terraform's provider blocks, declaring which providers are available and their connection details.
-- A plugin directory where provider binaries are placed, with each provider self-describing its schema on startup.
-- A registry for community providers, with local overrides for internal providers.
-
-Related: how is provider configuration versioned and shared across an organization if the framework is used by multiple people?
-
 ### Provider Contract Sub-questions
 
 - How does the provider report errors (invalid resource, insufficient broker permissions, rate limits)?
-- Should the provider expose a `renew(credential_id, duration)` method, or should renewal go through the full `issue` path?
 - Should the `metadata.injected` map support structured values (e.g., a list of configured repos) or stay strictly flat?
