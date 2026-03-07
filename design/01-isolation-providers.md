@@ -23,20 +23,38 @@ Isolation is modular, providing consistent semantics across varying container an
 
 Each isolation provider implements a consistent interface that the broker calls to manage isolated environments and deliver credentials into them.
 
-### Environment Lifecycle
+```go
+// EnvironmentHandle is an opaque reference to a running isolated environment.
+// Each isolation provider defines what this contains internally (e.g., a base
+// path for localhost, a container ID for devcontainer, a pod name for
+// kubernetes). The broker and harness pass it through without interpreting it.
+type EnvironmentHandle interface{}
 
-- `setup(config)` → environment handle — creates and starts the isolated environment. The `config` includes what CLI tools to install, what volumes to mount, and how to make the broker's MCP server available inside the environment.
-- `teardown(handle)` — stops and destroys the environment. Triggers credential revocation for all active credentials scoped to this environment.
+type IsolationProvider interface {
+    // Setup creates and starts the isolated environment. The config includes
+    // what CLI tools to install, what volumes to mount, and how to make the
+    // broker's MCP server available inside the environment.
+    Setup(ctx context.Context, config EnvironmentConfig) (EnvironmentHandle, error)
 
-### Credential Injection
+    // Teardown stops and destroys the environment. Triggers credential
+    // revocation for all active credentials scoped to this environment.
+    Teardown(ctx context.Context, handle EnvironmentHandle) error
 
-- `inject(handle, bundle)` → injection result — materializes a credential bundle in the environment. The bundle contains typed injection entries; the isolation provider implements the mechanics for each type it supports. Returns success or an error if an unsupported injection type is encountered.
+    // Inject materializes a credential bundle in the environment. The bundle
+    // contains typed injection entries; the isolation provider implements the
+    // mechanics for each type it supports. Returns an error if an unsupported
+    // injection type is encountered.
+    Inject(ctx context.Context, handle EnvironmentHandle, bundle CredentialBundle) (*InjectionResult, error)
+
+    // SupportedInjectionTypes declares which injection types (file, env, and
+    // any future types) this provider can handle. The broker checks this
+    // before routing a bundle, so unsupported types fail fast with a clear
+    // error rather than silently dropping entries.
+    SupportedInjectionTypes() []string
+}
+```
 
 Credential artifacts are not cleaned up on revocation or expiry — the credential is invalidated at the backend, and the files on disk become stale. When the container exits at task end, everything is destroyed.
-
-### Capabilities
-
-- `supported_injection_types()` → list of types — declares which injection types (`file`, `env`, and any future types) this provider can handle. The broker checks this before routing a bundle, so unsupported types fail fast with a clear error rather than silently dropping entries.
 
 ### Injection Type Implementation
 

@@ -25,7 +25,7 @@ Third parties can implement providers for their own backends (GCP, GitLab, Azure
 
 How the framework discovers and loads providers evolves with adoption phases:
 
-- **Early adoption**: Providers are hardcoded in the broker process. GitHub and Teleport credential logic is built directly into the TypeScript broker — no plugin loading, no discovery. The broker knows what providers exist because they're compiled in.
+- **Early adoption**: Providers are hardcoded in the broker process. GitHub and Teleport credential logic is built directly into the broker binary — no plugin loading, no discovery. The broker knows what providers exist because they're compiled in.
 - **At scale**: Providers are extracted into separate plugin binaries that run on credential workers, not the control plane. Workers load the provider plugins they're configured to run. The control plane routes jobs to the right worker pool by provider name — it doesn't need the provider binary itself.
 
 Provider configuration follows the Terraform model: a configuration file declares which providers are available and their connection details (identity sources, backend endpoints). In early adoption this is the broker's own config. At scale the control plane owns provider configuration centrally, and worker pools are deployed with the corresponding plugin binaries. Configuration is versioned alongside the broker's deployment — in organizational mode, it lives in the control plane's config store and applies uniformly across all operators.
@@ -34,13 +34,34 @@ Provider configuration follows the Terraform model: a configuration file declare
 
 Each provider implements a consistent interface that the broker calls to manage credentials:
 
-- `schema()` — returns the provider's supported resource types, permission levels, and additional match dimensions for overrides.
-- `classify(resource, permission)` → tier — returns the provider's default tier classification for a given request.
-- `issue(resource, permission, duration)` → credential bundle — creates a scoped, time-limited credential and returns a bundle describing what needs to be injected into the container and what metadata to show the agent.
-- `revoke(credential_id)` → boolean — invalidates the credential at the backend if possible (e.g., revokes a GitHub token via API). Returns whether backend-side revocation succeeded. Some backends don't support explicit revocation and rely on TTL expiry instead.
-- `validate(resource, permission)` → bool — checks whether the requested resource and permission are valid and the provider can fulfill them.
+```go
+type CredentialProvider interface {
+    // Schema returns the provider's supported resource types, permission
+    // levels, and additional match dimensions for overrides.
+    Schema() ProviderSchema
 
-There is no `renew()` method. Credential renewal flows through the same `request_access` → `issue()` path as the original request, subject to the same approval tier evaluation. The broker revokes the expiring credential and issues a fresh one. This keeps the provider interface simple and ensures renewal doesn't bypass approval controls.
+    // Classify returns the provider's default tier classification for a
+    // given resource and permission combination.
+    Classify(resource, permission string) Tier
+
+    // Issue creates a scoped, time-limited credential and returns a bundle
+    // describing what needs to be injected into the container and what
+    // metadata to show the agent.
+    Issue(ctx context.Context, resource, permission string, duration time.Duration) (*CredentialBundle, error)
+
+    // Revoke invalidates the credential at the backend if possible (e.g.,
+    // revokes a GitHub token via API). Returns whether backend-side
+    // revocation succeeded. Some backends don't support explicit revocation
+    // and rely on TTL expiry instead.
+    Revoke(ctx context.Context, credentialID string) (bool, error)
+
+    // Validate checks whether the requested resource and permission are
+    // valid and the provider can fulfill them.
+    Validate(resource, permission string) error
+}
+```
+
+There is no `Renew()` method. Credential renewal flows through the same `request_access` → `Issue()` path as the original request, subject to the same approval tier evaluation. The broker revokes the expiring credential and issues a fresh one. This keeps the provider interface simple and ensures renewal doesn't bypass approval controls.
 
 Credential providers are **isolation-agnostic**. They produce declarative bundles describing what needs to exist in the container — they do not write files or configure tools directly. The broker hands the bundle to the isolation provider, which knows how to materialize it in the container (see Credential Injection).
 
@@ -50,31 +71,48 @@ The `issue()` method returns a credential bundle: a declarative description of w
 
 A bundle consists of typed **injection entries**, each declaring an injection type that the isolation provider must implement. This keeps credential providers isolation-agnostic — they declare what they need, and the isolation provider decides how to materialize each type for its container technology.
 
-```typescript
-// Each entry declares a type and type-specific parameters
-type InjectionEntry =
-  | { type: "file"; path: string; content: string; mode?: string }  // content is base64-encoded
-  | { type: "env"; name: string; value: string };
+```go
+// InjectionEntry describes a single item to materialize in the container.
+// Each entry declares a type and type-specific parameters.
+type FileInjection struct {
+    Path    string // relative to container home
+    Content []byte // raw content (base64 encoding is a serialization concern)
+    Mode    string // e.g. "0755", optional
+}
 
-interface CredentialBundle {
-  // Unique identifier for this credential (used for revoke, monitoring)
-  credential_id: string;
+type EnvInjection struct {
+    Name  string
+    Value string
+}
 
-  // When the credential expires
-  expires: string;
+type InjectionEntry struct {
+    Type string // "file" or "env"
+    File *FileInjection
+    Env  *EnvInjection
+}
 
-  // Typed injection entries — each describes something to materialize
-  // in the container. Isolation providers implement the mechanics for
-  // each type.
-  injections: InjectionEntry[];
+// CredentialBundle is the output of a credential provider's Issue call.
+type CredentialBundle struct {
+    // Unique identifier for this credential (used for revoke, monitoring)
+    CredentialID string
 
-  // Metadata for the agent's context — provider-defined, describes what
-  // was configured in human-readable terms. This is the ONLY part of the
-  // bundle that reaches the model via the MCP response.
-  metadata: {
-    injected: Record<string, string>;
-    note: string;
-  };
+    // When the credential expires
+    Expires time.Time
+
+    // Typed injection entries — each describes something to materialize
+    // in the container. Isolation providers implement the mechanics for
+    // each type.
+    Injections []InjectionEntry
+
+    // Metadata for the agent's context — provider-defined, describes what
+    // was configured in human-readable terms. This is the ONLY part of the
+    // bundle that reaches the model via the MCP response.
+    Metadata BundleMetadata
+}
+
+type BundleMetadata struct {
+    Injected map[string]string
+    Note     string
 }
 ```
 

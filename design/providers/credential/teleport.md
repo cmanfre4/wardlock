@@ -57,7 +57,7 @@ The integration model for cloud APIs: the Teleport provider leverages Teleport's
 - The `kubernetes/v2` service type outputs a standard `kubeconfig.yaml` with embedded Teleport certs to a configured directory. The Wardlock Teleport provider manages tbot lifecycle and injects the output kubeconfig as a `file` injection entry.
 - On revocation, stop tbot. The Teleport certs in the kubeconfig are already short-lived and scoped to specific clusters/groups — stale files are harmless once the certs expire.
 
-TypeScript: `child_process.execFile` to wrap `tsh`/`tbot`, `js-yaml` for kubeconfig manipulation.
+Go: `os/exec` to wrap `tsh`/`tbot`, `gopkg.in/yaml.v3` for kubeconfig manipulation.
 
 ### Solo vs. Organizational Identity
 

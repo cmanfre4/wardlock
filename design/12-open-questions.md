@@ -13,17 +13,6 @@ These are cross-cutting open questions that span multiple components. Component-
 
 ---
 
-## Language Choices
-
-The original design assumed TypeScript for the broker (MCP SDK is TypeScript-first) and Go for credential provider plugins (Terraform-style single-binary distribution, direct Teleport client library access). The boundaries between components are well-defined protocols (MCP JSON-RPC, provider plugin protocol), not shared code, so mixed languages work.
-
-Options:
-- **TypeScript broker, Go providers** — the original plan. Natural MCP integration for the broker, natural plugin model for providers. Requires a protocol boundary between them.
-- **Go throughout** — broker and providers in Go. Single language, single build system, direct function calls between broker and providers in early phases. Requires evaluating Go MCP SDK maturity.
-- **TypeScript throughout** — broker and providers in TypeScript. Simplest to start. Loses single-binary distribution and direct Teleport client library access.
-
-To be informed by real usage and ecosystem maturity. The language choice doesn't affect the architecture — the provider contract, pluggable infrastructure interfaces, and decomposition model are language-agnostic.
-
 ## Multi-Agent Coordination
 
 If multiple agents are working on related tasks concurrently, how are their credential scopes managed?

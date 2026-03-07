@@ -16,11 +16,11 @@ Wardlock's trust boundary is the credential management flow: brokering, injectio
 
 ### What Wardlock Owns
 
-1. **Broker + core** — TypeScript, distributed via npm. Dependencies include the MCP SDK, crypto/cert libraries for mTLS.
-2. **First-party credential providers** (GitHub, Kubernetes) — TypeScript, npm dependencies (`jsonwebtoken`, `octokit`, `tsh` CLI wrapping).
-3. **First-party isolation providers** (devcontainer) — TypeScript, wraps the `devcontainer` CLI.
+1. **Broker + core** — Go, distributed as a single binary. Dependencies include the MCP SDK, crypto/cert libraries for mTLS.
+2. **First-party credential providers** (GitHub, Kubernetes) — Go, compiled into the broker binary in early phases. Dependencies include `golang-jwt/jwt`, `google/go-github`, `tsh`/`tbot` CLI wrapping.
+3. **First-party isolation providers** (devcontainer) — Go, wraps the `devcontainer` CLI.
 
-These are under the project's direct control. The primary exposure is the **npm dependency tree** — a compromised transitive dependency in any of these could intercept secrets as they flow through broker or provider code.
+These are under the project's direct control. The primary exposure is the **Go module dependency tree** — a compromised transitive dependency in any of these could intercept secrets as they flow through broker or provider code. Go's single-binary distribution and smaller dependency trees reduce this surface compared to npm-based alternatives.
 
 ### What Wardlock Does Not Own
 

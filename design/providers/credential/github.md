@@ -39,7 +39,7 @@ Uses the GitHub App JWT authentication flow: sign a JWT with the App private key
 - The GitHub REST API endpoint is `POST /app/installations/{installation_id}/access_tokens` with a body specifying `repositories` and `permissions`.
 - A custom git credential helper returns the token only for matching HTTPS URLs, ensuring the token only works for in-scope repos. The token exists in the credential helper script on the container's filesystem — git consumes it transparently without the model needing to handle it.
 - Git identity is configured as the App's bot account — commits are automatically verified by GitHub.
-- TypeScript libraries: `jsonwebtoken` for JWT signing, `octokit` for GitHub API calls.
+- Go: `golang-jwt/jwt` for JWT signing, `google/go-github` for GitHub API calls.
 
 ## Injection
 
